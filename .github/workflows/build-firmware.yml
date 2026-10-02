@@ -1,0 +1,57 @@
+# AI Passport 固件构建(mic-mode 补丁) —— 放到 fork 的
+# .github/workflows/build-firmware.yml 即可;推 mic-mode 分支或手动触发。
+# 产物: 可从 0x0 烧录的合并 full.bin(esptool / tool.folotoy.cn 均可刷)。
+name: build-firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "mic-mode"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.3
+      options: --user root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build (ESP32-C3)
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          source "$IDF_PATH/export.sh"
+          idf.py set-target esp32c3
+          idf.py build
+
+      - name: Merge full.bin (0x0 可烧录)
+        shell: bash
+        run: |
+          source "$IDF_PATH/export.sh"
+          cd "$GITHUB_WORKSPACE"
+          if idf.py merge-bin -o full.bin; then
+            echo "idf.py merge-bin ok"
+          else
+            # 回退:显式偏移合并(C3: bootloader 0x0 / 分区表 0x8000 / app 0x10000)
+            python "$IDF_PATH/components/esptool_py/esptool/esptool.py" \
+              --chip esp32c3 merge_bin -o full.bin \
+              --flash_mode dio --flash_size 8MB --flash_freq 80m \
+              0x0     build/bootloader/bootloader.bin \
+              0x8000  build/partition_table/partition-table.bin \
+              0x10000 build/FoloToy-AI-Passport.bin
+          fi
+          ls -la full.bin
+          sha256sum full.bin
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-passport-mic-full-bin
+          path: full.bin
+          if-no-files-found: error
