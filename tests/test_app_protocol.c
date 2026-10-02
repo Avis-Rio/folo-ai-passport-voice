@@ -92,6 +92,23 @@ static void test_parse_time_set(void) {
     assert(!app_protocol_parse(j5, strlen(j5), &ev));
 }
 
+// {"type":"mic","state":"on"|"off"} → APP_EV_MIC_ON/OFF(BLE CTRL 常开麦开关)。
+static void test_parse_mic(void) {
+    app_event_t ev;
+    const char *on  = "{\"type\":\"mic\",\"state\":\"on\"}";
+    assert(app_protocol_parse(on, strlen(on), &ev));
+    assert(ev.type == APP_EV_MIC_ON);
+
+    const char *off = "{\"type\":\"mic\",\"state\":\"off\"}";
+    assert(app_protocol_parse(off, strlen(off), &ev));
+    assert(ev.type == APP_EV_MIC_OFF);
+
+    const char *bad1 = "{\"type\":\"mic\"}";                     // 缺 state:拒绝
+    assert(!app_protocol_parse(bad1, strlen(bad1), &ev));
+    const char *bad2 = "{\"type\":\"mic\",\"state\":\"turbo\"}";  // 非法值:拒绝
+    assert(!app_protocol_parse(bad2, strlen(bad2), &ev));
+}
+
 static void test_parse_rejects(void) {
     app_event_t ev;
     assert(!app_protocol_parse("{\"type\":\"nope\"}", 14, &ev));             // 未知 type
@@ -261,6 +278,7 @@ int main(void) {
     test_parse_agent_status();
     test_parse_approval();
     test_parse_transcript();
+    test_parse_mic();
     test_parse_time_set();
     test_parse_rejects();
     test_parse_deep_nesting_rejected();

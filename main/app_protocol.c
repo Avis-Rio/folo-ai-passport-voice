@@ -122,6 +122,19 @@ static bool parse_time_set(const cJSON *o, app_event_t *ev) {
     return true;
 }
 
+// {"type":"mic","state":"on"|"off"} → APP_EV_MIC_ON/OFF。
+// BLE CTRL 通道的常开麦开关(USB 走 console `mic on|off`,语义等价):
+// Mac 端 BLE 传输在 EVENT CCCD 订阅成功(link_up)后发 on,断开前发 off;
+// 断链兜底由 app_state handle_link_down 收束(清 mic_hold),双保险。
+static bool parse_mic(const cJSON *o, app_event_t *ev) {
+    const cJSON *st = cJSON_GetObjectItemCaseSensitive(o, "state");
+    if (!cJSON_IsString(st)) return false;
+    if      (strcmp(st->valuestring, "on")  == 0) ev->type = APP_EV_MIC_ON;
+    else if (strcmp(st->valuestring, "off") == 0) ev->type = APP_EV_MIC_OFF;
+    else return false;
+    return true;
+}
+
 bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     if (!json || len == 0 || len > APP_PROTO_RX_CAP) return false;
     if (!json_depth_ok(json, len)) return false;   // 深层嵌套:拒绝,保护解析者栈
@@ -134,6 +147,7 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
         else if (strcmp(type->valuestring, "agent.approval_request") == 0) ok = parse_approval(root, ev);
         else if (strcmp(type->valuestring, "transcript") == 0)           ok = parse_transcript(root, ev);
         else if (strcmp(type->valuestring, "time.set") == 0)             ok = parse_time_set(root, ev);
+        else if (strcmp(type->valuestring, "mic") == 0)                  ok = parse_mic(root, ev);
         // 未知 type:丢弃(返回 false,调用方记日志)
     }
     cJSON_Delete(root);
