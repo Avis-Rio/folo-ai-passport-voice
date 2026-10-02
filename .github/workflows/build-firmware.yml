@@ -27,8 +27,21 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           source "$IDF_PATH/export.sh"
-          idf.py set-target esp32c3
-          idf.py build
+          cd "$GITHUB_WORKSPACE"
+          for i in 1 2; do
+            echo "=== 构建尝试 $i ==="
+            # 组件源(CDN)偶发下载损坏 → 每次尝试前清掉半成品
+            rm -rf managed_components dependencies.lock
+            if idf.py set-target esp32c3 && idf.py build; then
+              echo "构建成功(第 $i 次尝试)"
+              exit 0
+            fi
+            echo "第 $i 次失败,清理后重试..."
+            rm -rf managed_components dependencies.lock build
+          done
+          echo "=== 两次均失败,输出 idf 详细错误 ==="
+          tail -n 120 build/log/idf_py_stderr_output_* 2>/dev/null || true
+          exit 1
 
       - name: Merge full.bin (0x0 可烧录)
         shell: bash
