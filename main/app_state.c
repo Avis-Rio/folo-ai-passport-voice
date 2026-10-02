@@ -379,6 +379,11 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         // DOWN 长按压根形成不了。
         if ((ev->type == APP_EV_KEY_LONG_UP || ev->type == APP_EV_KEY_RELEASE) &&
             b == APP_BTN_UP) {
+            // 常开麦克风模式(mic_hold):物理 UP 松开不收口 —— 守护进程"虚拟
+            // 按住"期间用户碰一下实体键不应掐断直播音频;mic 只听 `mic off`。
+            if (s->mic_hold) {
+                break;
+            }
             // 误触收口:不足 PTT_MIN_TALK_MS 就松手 = 误碰或轻点,里面不可能有
             // 语音。丢掉音频、把会话收束回 READY,不进转写。
             if (now_ms - s->state_since_ms < PTT_MIN_TALK_MS) {
@@ -490,7 +495,9 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
         // 说话时长兜底(2026-08-29 新增,见 APP_PTT_MAX_TALK_MS):松开事件丢失
         // 时 LISTENING 会永久滞留。到点按"正常松手"处理 —— 已录内容照常进转写,
         // 不给错误提示(真人一口气到不了 60s,正常路径不可达)。
-        else if (elapsed >= APP_PTT_MAX_TALK_MS) {
+        // 常开麦克风模式(mic_hold,2026-10-02):会话本来就预期无限长,跳过本
+        // 兜底;收束只由 `mic off` / 链路断开触发(守护进程有看门狗自动重开)。
+        else if (!s->mic_hold && elapsed >= APP_PTT_MAX_TALK_MS) {
             end_ptt(s, now_ms, out, n, max);
         }
         break;
@@ -513,6 +520,9 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
 // 审批保持:等待 Mac 重连后重发请求。
 static void handle_link_down(app_state_t *s, uint64_t now_ms, const char *toast,
                              app_action_t *out, uint8_t *n, uint8_t max) {
+    // 常开麦克风模式随链路一起收束:链路断 = Mac 端守护进程已不在,
+    // mic_hold 残留会让下一次 `mic on` 幂等误判(LISTENING 误吞)。
+    s->mic_hold = false;
     // CANCEL:断链时无 Mac 可发,清残留防断链前的帧流入下一次会话
     app_action_t st = { .type = APP_ACT_STREAM_CANCEL };
     emit(out, n, max, st);   // 幂等,未开流时执行器无副作用
@@ -766,6 +776,59 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         {
             app_action_t b = { .type = APP_ACT_UI_REFRESH };
             emit(out, out_n, max, b);
+        }
+        break;
+
+    // ---- 常开麦克风模式(console `mic on|off` 经 SYS 帧下行,2026-10-02)----
+
+    case APP_EV_MIC_ON:
+        // HOME 先进 READY(RESET 后设备停在 HOME,守护进程连上即 mic on,
+        // 不应要求人工先按 OK);READY 直接走与 PTT 相同的 start_ptt
+        // (OFFLINE toast / 滴声 → voice.start → TONE_DONE 开流,零新路径)。
+        // mic_hold 只在真正进入 LISTENING 时置位 —— 离线时 start_ptt 原地
+        // 不动,不留"悬空 hold"(链路恢复也不该自动开麦,由看门狗重发)。
+        // 已在 mic_hold 的 LISTENING = 重复 mic on,幂等忽略。
+        if (s->state == APP_ST_HOME) {
+            go_ready(s, now_ms, out, out_n, max);
+        }
+        if (s->state == APP_ST_READY) {
+            start_ptt(s, now_ms, out, out_n, max);
+            s->mic_hold = (s->state == APP_ST_LISTENING);
+            break;
+        }
+        if (s->state == APP_ST_LISTENING) {
+            if (!s->mic_hold) {
+                // 物理按住说话进行中:拒绝抢占,提示而不是静默丢命令
+                set_toast(s, now_ms, "MIC busy (PTT active)");
+                app_action_t t = { .type = APP_ACT_PLAY_TONE };
+                t.u.tone = APP_TONE_ERROR;
+                emit(out, out_n, max, t);
+            }
+            break;
+        }
+        // TRANSCRIBING / AGENT_RUNNING / APPROVAL:不与工作流抢音频
+        set_toast(s, now_ms, "MIC busy");
+        {
+            app_action_t t2 = { .type = APP_ACT_PLAY_TONE };
+            t2.u.tone = APP_TONE_ERROR;
+            emit(out, out_n, max, t2);
+        }
+        break;
+
+    case APP_EV_MIC_OFF:
+        // mic_hold 中收口:停流 + voice.end + 直接回 READY —— 不进 TRANSCRIBING
+        // (常开麦克风没有"等转写"语义,Mac 端守护进程只消费 PCM)。链路断开
+        // 已把 mic_hold 清掉(handle_link_down),这里 LISTENING 之外只清残留
+        // 标志,不产生任何动作。
+        if (s->state == APP_ST_LISTENING && s->mic_hold) {
+            s->mic_hold = false;
+            app_action_t st = { .type = APP_ACT_STREAM_STOP };
+            emit(out, out_n, max, st);
+            app_action_t v = { .type = APP_ACT_SEND_VOICE_END };
+            emit(out, out_n, max, v);
+            go_ready(s, now_ms, out, out_n, max);
+        } else {
+            s->mic_hold = false;
         }
         break;
     }

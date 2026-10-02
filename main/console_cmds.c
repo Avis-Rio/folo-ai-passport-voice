@@ -328,6 +328,28 @@ static int cmd_factory(int argc, char **argv)
     return 0;
 }
 
+// ---- mic:常开麦克风模式(2026-10-02,V 方案虚拟麦克风)----
+// 用法: mic on | mic off
+// 经事件队列投递 APP_EV_MIC_ON/OFF,由 app_state 归约器统一处理(与 PTT 同
+// 一条音频路径:start_ptt → 滴声 → voice.start → TONE_DONE 开流)。本命令只
+// 投递不等待,立即返回;实际开流结果看后续 EVENT 行(voice.start/voice.end)。
+// 队列满时丢弃(app_event_post 非阻塞语义),守护进程看门狗会重试。
+static int cmd_mic(int argc, char **argv)
+{
+    app_event_t ev = {0};
+    if (argc >= 2 && strcmp(argv[1], "on") == 0) {
+        ev.type = APP_EV_MIC_ON;
+    } else if (argc >= 2 && strcmp(argv[1], "off") == 0) {
+        ev.type = APP_EV_MIC_OFF;
+    } else {
+        out("usage: mic on | mic off\n");
+        return 1;
+    }
+    app_event_post(&ev);
+    out("mic %s: posted\n", argv[1]);
+    return 0;
+}
+
 // ---- 命令表(REPL 注册与 SYS 执行共用)----
 // 注:模式切换命令(mode)已随双通道常开架构退役(2026-08-28)。
 static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
@@ -337,6 +359,7 @@ static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = 
     { "rst",     cmd_rst },
     { "reboot",  cmd_reboot },
     { "factory", cmd_factory },
+    { "mic",     cmd_mic },
 };
 #define CMD_COUNT (sizeof(s_cmds) / sizeof(s_cmds[0]))
 
@@ -419,5 +442,6 @@ esp_err_t console_cmds_register(void)
     reg("time", "校时:time | time set <epoch> | time tz <±hh>", NULL, cmd_time);
     reg("reboot", "重启设备", NULL, cmd_reboot);
     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
+    reg("mic", "常开麦克风模式:mic on | mic off(虚拟麦克风用)", NULL, cmd_mic);
     return ESP_OK;
 }

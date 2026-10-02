@@ -43,6 +43,9 @@ typedef struct {
     char           approval_diff[APP_DIFF_MAX];
     uint8_t        approval_risk;
     bool           approval_details;   // ▼ 详情视图开关
+    bool           mic_hold;           // 常开麦克风模式(console `mic on` 置位):
+                                       // LISTENING 下吞掉物理 UP 松开与 60s 兜底,
+                                       // 仅 `mic off`/链路断开收束(2026-10-02)
 } app_state_t;
 
 void app_state_init(app_state_t *s);

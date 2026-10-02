@@ -71,6 +71,12 @@ typedef enum {
     APP_EV_USB_CONNECTED,   // USB 会话通(收到 PC 握手 ping;link_up 的 USB 侧充分条件)
     APP_EV_USB_DISCONNECTED, // USB 会话断(拔线:is_connected 翻转)
     APP_EV_TIME_SET,         // 校时下行(epoch 秒 UTC;双通道共用:CTRL time.set 行 + SYS time set)
+    // ---- 常开麦克风模式(V 方案虚拟麦克风,2026-10-02)----
+    // 由 console `mic on|off` 命令(SYS 帧下行)投递,把 PTT 变成"持续开麦":
+    // mic_hold 期间 60s 兜底停录不生效、物理 UP 松开不收口,只有 mic off /
+    // 链路断开能结束。供桌面端把 Passport 当系统级麦克风用(BlackHole 中转)。
+    APP_EV_MIC_ON,
+    APP_EV_MIC_OFF,
 } app_event_type_t;
 
 // ---------------- 链路通道(双通道常开架构,2026-08-28) ----------------

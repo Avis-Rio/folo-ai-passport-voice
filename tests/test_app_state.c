@@ -1551,6 +1551,103 @@ static void test_wired_no_screen_off(void) {
     assert(s.panel_on == false);
 }
 
+// ---- 常开麦克风模式(console `mic on|off`,2026-10-02)----
+static void mic_ev(app_event_type_t type, uint64_t ts) {
+    app_event_t ev = { .type = type };
+    app_state_reduce(&s, &ev, ts, out, &on);
+}
+
+// HOME 下 mic on:先进 READY 再 start_ptt,与 PTT 同路径(滴声 → voice.start,
+// 开流仍由 TONE_DONE 驱动),mic_hold 置位。
+static void test_mic_on_from_home(void) {
+    reset();                               // HOME
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    assert(s.state == APP_ST_LISTENING);
+    assert(s.mic_hold == true);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+    assert(!has_action(APP_ACT_STREAM_START));
+    app_event_t ev = { .type = APP_EV_TONE_DONE };
+    app_state_reduce(&s, &ev, now + 200, out, &on);
+    assert(has_action(APP_ACT_STREAM_START));
+    assert(s.stream_started == true);
+}
+
+// 离线 mic on:start_ptt 原地不动(OFFLINE toast),不留悬空 hold。
+static void test_mic_on_offline_no_residue(void) {
+    reset();                               // link_up = false
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    assert(s.state == APP_ST_READY);
+    assert(s.mic_hold == false);
+    assert(strstr(s.toast, "OFFLINE"));
+}
+
+// mic_hold 下 60s 说话时长兜底不生效(会话预期无限长)。
+static void test_mic_60s_not_forced(void) {
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce(APP_EV_TICK, now + 61500);      // 超过 APP_PTT_MAX_TALK_MS
+    assert(s.state == APP_ST_LISTENING);
+    assert(!has_action(APP_ACT_SEND_VOICE_END));
+    assert(!has_action(APP_ACT_STREAM_STOP));
+}
+
+// mic off:停流 + voice.end + 直接回 READY(不进 TRANSCRIBING,无转写语义)。
+static void test_mic_off_returns_ready(void) {
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    mic_ev(APP_EV_MIC_OFF, now + 5000);
+    assert(s.state == APP_ST_READY);
+    assert(s.mic_hold == false);
+    assert(has_action(APP_ACT_STREAM_STOP));
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+    assert_action_order(APP_ACT_STREAM_STOP, APP_ACT_SEND_VOICE_END);
+}
+
+// mic_hold 期间物理 UP 松开被吞掉:直播音频不因误碰实体键被掐断。
+static void test_mic_swallows_release(void) {
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce_btn(APP_EV_KEY_LONG_UP, APP_BTN_UP, now + 9000);
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 9050);
+    assert(s.state == APP_ST_LISTENING);
+    assert(s.mic_hold == true);
+    assert(!has_action(APP_ACT_SEND_VOICE_END));
+    mic_ev(APP_EV_MIC_OFF, now + 9100);
+    assert(s.state == APP_ST_READY);
+}
+
+// 链路断开收束 mic 会话并清掉 hold 残留(否则下次 mic on 幂等误判)。
+static void test_mic_link_down_clears_hold(void) {
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    assert(s.mic_hold == true);
+    app_event_t ev = { .type = APP_EV_BLE_DISCONNECTED };
+    app_state_reduce(&s, &ev, now + 90000, out, &on);
+    assert(s.state == APP_ST_READY);
+    assert(s.mic_hold == false);
+    assert(has_action(APP_ACT_STREAM_CANCEL));
+}
+
+// 物理 PTT 进行中 mic on:拒绝抢占(MIC busy toast),原会话不受影响。
+static void test_mic_busy_during_ptt(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+    assert(s.state == APP_ST_LISTENING && !s.mic_hold);
+    mic_ev(APP_EV_MIC_ON, now + 40);
+    assert(s.state == APP_ST_LISTENING && !s.mic_hold);
+    assert(strstr(s.toast, "MIC busy"));
+}
+
 int main(void) {
     test_home_nav();
     test_down_enter_clear();
@@ -1580,6 +1677,13 @@ int main(void) {
     test_panel_off_longest_paths();
     test_audio_error_closes_session();
     test_ptt_max_talk_watchdog();
+    test_mic_on_from_home();
+    test_mic_on_offline_no_residue();
+    test_mic_60s_not_forced();
+    test_mic_off_returns_ready();
+    test_mic_swallows_release();
+    test_mic_link_down_clears_hold();
+    test_mic_busy_during_ptt();
     test_fake_key_is_not_activity();
     test_ok_long_lock_mv_gate();
     test_up_taps_never_clear();
