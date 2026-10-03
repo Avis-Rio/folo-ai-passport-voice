@@ -45,6 +45,8 @@ typedef struct {
     lv_obj_t *ap_diff;                    // APPROVAL:摘要/详情
     lv_obj_t *set_panels[3];              // SETTINGS:三行选项面板(高亮=选中)
     lv_obj_t *set_values[3];              // SETTINGS:右侧当前值
+    lv_obj_t *menu_panels[3];             // HOME 菜单:三行(语音输入/设置/固件)
+    lv_obj_t *menu_values[3];             // HOME 菜单右侧(FW 槽状态)
 } page_t;
 
 static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
@@ -167,6 +169,9 @@ static void build_chrome(void)
 // ---- 各状态页 ----
 static void build_home(void)
 {
+    // 菜单首页(2026-10-03 v2):HOME 从"待机语"变成真正的启动器 ——
+    // 0=Voice Input(进语音输入法)/ 1=Settings / 2=Firmware B(长按切槽)。
+    // 行样式与设置页同一语言(纸面板 + 选中黄底),键位心智零新增。
     page_t *p = &s_pages[APP_ST_HOME];
     p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
     lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
@@ -176,15 +181,23 @@ static void build_home(void)
     lv_obj_set_size(p->root, W, H);
     lv_obj_set_pos(p->root, 0, 0);
 
-    lv_obj_t *plate = ui_pixel_panel_create(p->root, 20, CONTENT_Y + 8, 200, 40, UI_PAPER);
-    // plate 有 pad_all 7(label 坐标相对 content 区,原点右移 7px),x=-7 抵消
-    // 后文字才真正水平居中于面板(此前偏右 7px)。
-    label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
-    ui_pixel_mascot_create(p->root, 101, 100);
-    label(p->root, "tap OK to start", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
-    // 键位提示(2026-10-03 修正):旧文案 "DBL-VOL+: CLEAR" 是 2026-08 前的键位
-    // (清空已迁 DOWN 长按);补上设置入口。
-    hint_label(p->root, "OK: READY   DBL-OK: SETTINGS");
+    label(p->root, "MENU", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 8, W);
+
+    static const char *const names[3] = {
+        "Voice Input", "Settings", "Firmware B",
+    };
+    for (int i = 0; i < 3; i++) {
+        const int y = 104 + i * 48;
+        p->menu_panels[i] = ui_pixel_panel_create(p->root, 20, y, 200, 36, UI_PAPER);
+        lv_obj_t *name = label(p->menu_panels[i], names[i], &lv_font_montserrat_14,
+                               UI_INK, 0, 6, 118);
+        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_LEFT, 0);
+        p->menu_values[i] = label(p->menu_panels[i], i < 2 ? ">" : "--",
+                                  &lv_font_montserrat_14, UI_INK, 118, 6, 68);
+        lv_obj_set_style_text_align(p->menu_values[i], LV_TEXT_ALIGN_RIGHT, 0);
+    }
+    // 键位提示:切固件是重启级操作,只认 OK 长按(单击在菜单第 2 行故意无动作)。
+    hint_label(p->root, "VOL: SELECT   OK: OPEN   HOLD OK: FW");
 }
 
 static void build_ready(void)
@@ -477,8 +490,22 @@ void app_ui_render(const app_ui_snapshot_t *snap)
     }
 
     // ---- 页内容 ----
-    show_page(snap->state);
-    switch (snap->state) {
+    // 录音中设置浮层(2026-10-03 v2):state 仍 LISTENING,页切到设置并按设置
+    // 渲染 —— 与全状态设置页共用同一组控件;浮层退出后 show_page 回录音页。
+    const app_stage_t page = snap->settings_overlay ? APP_ST_SETTINGS : snap->state;
+    show_page(page);
+    switch (page) {
+    case APP_ST_HOME: {
+        // 菜单首页:选中高亮 + 固件槽状态(开机探测落地,见 APP_EV_SLOT_PROBE)
+        page_t *hp = &s_pages[APP_ST_HOME];
+        for (int i = 0; i < 3; i++) {
+            ui_pixel_set_selected(hp->menu_panels[i], i == snap->menu_sel, true);
+        }
+        label_set_if_changed(hp->menu_values[0], ">");
+        label_set_if_changed(hp->menu_values[1], ">");
+        label_set_if_changed(hp->menu_values[2], snap->slot_b_present ? "ready" : "--");
+        break;
+    }
     case APP_ST_LISTENING:
         // 录音中只显示麦克风图标(静态), 无音量可视化; 仅计时实时刷新
         label_set_fmt_if_changed(s_pages[APP_ST_LISTENING].rec_elapsed, "%ds",

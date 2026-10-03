@@ -1,6 +1,11 @@
-# AI Passport 自定义分区表(8MB Flash,单 app 无 OTA)
-# factory 4MB: 当前固件 ~1.7MB,为后续功能与 OTA 预留空间。
+# AI Passport 分区表 v2(2026-10-03):8MB Flash 双 OTA 槽,支持菜单切固件
+# - nvs/phy 偏移不变(0x9000/0xf000):升级重刷后设置(NVS 键)与校准数据保留
+# - otadata 0x10000:OTA 启动选择记录(替代原 factory 单槽的固定入口)
+# - ota_0 语音输入法固件 / ota_1 游戏·工具固件,各 3.9MB(当前 app ~1.1MB,余量充足)
+# - 尾部 0x7D2000..0x800000(~184KB)预留 coredump
 # Name,   Type, SubType, Offset,  Size,    Flags
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x400000,
+otadata,  data, ota,     0x10000, 0x2000,
+ota_0,    app,  ota_0,   0x12000, 0x3E0000,
+ota_1,    app,  ota_1,   0x3F2000, 0x3E0000,

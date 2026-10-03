@@ -80,25 +80,65 @@ static void reset(void) {
 }
 
 // ---- HOME:● 单击进入 READY;▼ 单击=回车 / 长按=清空;▲ 无空闲语义 ----
+// ---- HOME(菜单首页 v2):VOL± = 选行;OK 单击 = 进选中行;FW 行长按 = 切固件 ----
 static void test_home_nav(void) {
+    // 行 0(语音输入):OK 单击 → READY(与 v1 日常路径一致)
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
     assert(s.state == APP_ST_READY);
 
+    // VOL± = 选行(不切状态、不上行):▼ 0→1,▲ 回 0,▲ 环绕 0→2,▲ 2→1
     reset();
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
-    assert(s.state == APP_ST_HOME);                // HOME 不切走
-    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+    assert(s.state == APP_ST_HOME && s.menu_sel == 1);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));     // 菜单内 DOWN 单击不再注入回车
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 20);
+    assert(s.menu_sel == 0);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
+    assert(s.menu_sel == 2);                          // 环绕
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 40);
+    assert(s.menu_sel == 1);
 
+    // 行 1(设置):OK 单击 → SETTINGS
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 20);
+    assert(s.state == APP_ST_SETTINGS);
+
+    // 行 2(切固件):OK 单击故意无动作(重启级操作只认长按);
+    // 槽 B 空 → 长按给 toast + ERROR 音,不切;SLOT_PROBE 落地后 → FW_SWITCH
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);   // 0 → 2(环绕)
+    assert(s.menu_sel == 2);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 20);
+    assert(s.state == APP_ST_HOME);                        // 单击无动作
+    assert(!has_action(APP_ACT_FW_SWITCH));
+    s.wake_ms = now;                                       // 过 OK_LONG_GUARD(1s)
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 2000);   // 槽 B 空
+    assert(!has_action(APP_ACT_FW_SWITCH));
+    assert(strstr(s.toast, "empty") != NULL);
+    {
+        app_event_t ev = { .type = APP_EV_SLOT_PROBE };
+        ev.u.slot_probe.present = 1;
+        app_state_reduce(&s, &ev, now + 2100, out, &on);
+    }
+    assert(s.slot_b_present == 1);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 3000);   // 槽 B 在位 → 切换
+    {
+        app_action_t *a = find_action(APP_ACT_FW_SWITCH);
+        assert(a && a->u.fw_switch.slot == 1);
+    }
+
+    // DOWN 长按仍是全局清空语义(菜单页无输入框,CLEAR 上行无害,键位表不破)
     reset();
     reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 10);
-    assert(s.state == APP_ST_HOME);                // DOWN 长按=清空,不切走
-    a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    assert(s.state == APP_ST_HOME);
+    {
+        app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
+        assert(a && a->u.key_action.action == APP_KEY_CLEAR);
+    }
 
-    // ▼/▲ 双击无语义;● 双击 = 进设置(2026-10-03,状态切走是有意行为 ——
-    // 旧断言"三键双击一律停在 HOME"随之收窄到 ▼/▲)
+    // ▲/▼ 双击在菜单无语义(选行只认单击,双击不产生上行)
     for (int i = 0; i < 2; i++) {
         const app_btn_t b[] = { APP_BTN_UP, APP_BTN_DOWN };
         reset();
@@ -106,15 +146,6 @@ static void test_home_nav(void) {
         assert(s.state == APP_ST_HOME);
         assert(!has_action(APP_ACT_SEND_KEY_ACTION));
     }
-    reset();
-    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
-    assert(s.state == APP_ST_SETTINGS);               // ● 双击:进设置(防御路径,真实流先经 READY)
-
-    // ▲ 空闲:无切换、无动作
-    reset();
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 10);
-    assert(s.state == APP_ST_HOME);
-    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
 }
 
 // ---- READY:OK 已退出 PTT;▲ 长按=说话;▼ 单击=回车 / 长按=清空 ----
@@ -1208,16 +1239,16 @@ static void test_ok_long_lock_mv_gate(void) {
 // 息屏(超时 tick 驱动)后按键应唤醒并照常执行操作,不再被吞;锁定态的
 // "照常执行但不亮屏"由 locked 门禁负责(见 test_locked_keys_operate_screen_off)。
 static void test_screen_off_keys_pass_through(void) {
-    // a. ▼ DOWN 单击(息屏):唤醒 + APP_KEY_ENTER 上行
+    // a. ▼ DOWN 单击(息屏):唤醒 + 菜单选行(v2:HOME DOWN 单击不再注入回车)
     reset();
     reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);   // 20s 无键:关背光
     assert(s.screen_on == false);
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_DOWN, now + 10);       // 按下:唤醒
     assert(s.screen_on == true);
     assert(has_action(APP_ACT_UI_SCREEN_ON));
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 20);       // 单击:照常回车
-    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
-    assert(a && a->u.key_action.action == APP_KEY_ENTER);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 20);       // 单击:菜单选行
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+    assert(s.menu_sel == 1);                                    // 0 → 1
 
     // b. ▲ UP 按下(READY,息屏):唤醒 + start_ptt 进 LISTENING(同一个 PRESS)
     reset();
@@ -1247,7 +1278,7 @@ static void test_screen_off_keys_pass_through(void) {
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_DOWN, now + 10);       // 按下:唤醒
     assert(s.screen_on == true);
     reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 500);       // 0.5s 长按:清空
-    a = find_action(APP_ACT_SEND_KEY_ACTION);
+    app_action_t *a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 }
 
@@ -1888,6 +1919,103 @@ static void test_settings_snapshot(void) {
     assert(snap.night_mute == 1);
 }
 
+// ---- 录音中设置浮层(2026-10-03 v2):常开麦 OK 双击呼出,录音不断,退出回录音现场 ----
+static void test_settings_overlay_listening(void) {
+    // 入口 + 键位走设置语义 + OK 长按退出:录音现场全程不动
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    assert(s.state == APP_ST_LISTENING && s.mic_hold);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 1000);
+    assert(s.settings_overlay == 1);
+    assert(s.state == APP_ST_LISTENING);        // 状态不动
+    assert(s.mic_hold == true);                 // 录音不受影响
+    assert(!has_action(APP_ACT_STREAM_CANCEL));
+    assert(!has_action(APP_ACT_STREAM_STOP));
+
+    // 浮层内 DOWN 选行 → OK 切夜间静音(SAVE 落地),仍在浮层
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 1100);
+    assert(s.settings_sel == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1200);
+    assert(s.night_mute == 1);
+    assert(has_action(APP_ACT_SAVE_SETTINGS));
+    assert(s.state == APP_ST_LISTENING && s.settings_overlay == 1);
+
+    // OK 长按退出:只清浮层,state 仍 LISTENING
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 1300);
+    assert(s.settings_overlay == 0);
+    assert(s.state == APP_ST_LISTENING);
+    assert(s.mic_hold == true);
+
+    // 浮层内 DOWN 长按 = 退出浮层,拦截先于全局清空分支(无 CLEAR 上行/确认音)
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 1000);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 1100);
+    assert(s.settings_overlay == 0);
+    assert(s.state == APP_ST_LISTENING);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+    assert(!has_action(APP_ACT_PLAY_TONE));
+
+    // 10s 无操作:浮层自动收起,回录音现场(不是 READY)
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 1000);
+    assert(s.settings_overlay == 1);
+    reduce(APP_EV_TICK, now + 1000 + APP_SETTINGS_IDLE_EXIT_MS + 1);
+    assert(s.settings_overlay == 0);
+    assert(s.state == APP_ST_LISTENING);
+
+    // mic off 断链收束:浮层随 abort_to_ready 清掉
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 1000);
+    mic_ev(APP_EV_MIC_OFF, now + 2000);
+    assert(s.settings_overlay == 0);
+    assert(s.state == APP_ST_READY);
+
+    // UP 双击切档手势在浮层内让位(选行优先),浮层外不变
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 1000);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1100);
+    assert(s.tone_level == 2);                  // 未切档(浮层消费)
+    assert(s.settings_overlay == 1);
+
+    // 防御(真实流不可达,构造异常态):PTT 中浮层未关,UP 松开先收浮层再收口
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+    assert(s.state == APP_ST_LISTENING && !s.mic_hold);
+    s.settings_overlay = 1;
+    reduce_btn(APP_EV_KEY_RELEASE, APP_BTN_UP, now + 1000);
+    assert(s.settings_overlay == 0);
+    assert(s.state == APP_ST_TRANSCRIBING);     // 原收口路径完好
+}
+
+// 双固件快照字段:菜单行/槽 B 在位/浮层标志逐项透传(渲染分流依据)。
+static void test_menu_overlay_snapshot(void) {
+    reset();
+    s.menu_sel = 2;
+    s.slot_b_present = 1;
+    s.settings_overlay = 1;
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(snap.menu_sel == 2);
+    assert(snap.slot_b_present == 1);
+    assert(snap.settings_overlay == 1);
+}
+
 int main(void) {
     test_home_nav();
     test_down_enter_clear();
@@ -1932,6 +2060,8 @@ int main(void) {
     test_mic_hold_double_cycles_tone();
     test_settings_set_event();
     test_settings_snapshot();
+    test_settings_overlay_listening();
+    test_menu_overlay_snapshot();
     test_fake_key_is_not_activity();
     test_ok_long_lock_mv_gate();
     test_up_taps_never_clear();

@@ -29,13 +29,14 @@ typedef enum {
 } app_stage_t;
 
 // ---------------- 按键 ----------------
-// 物理键语义(2026-10-03 增设置页):UP(音量加)= 按下即录、松开发送(按住说话);
-// 常开麦(mic_hold)期间 UP 双击 = 循环切换提示音档位(该场景 UP 物理事件本就
-// 全部被吞,是唯一无冲突的快捷手势);DOWN(音量减)= 单击回车 / 长按 0.5s 清空
-// (设置页内长按 = 退出设置);OK = 单击导航·批准 / 双击进设置(HOME/READY)/
-// 长按 0.5s 锁屏解锁(设置页内长按 = 退出设置)。同一颗键上只放"单击 + 长按",
-// 不放双击(见 app_state.c);唯一例外 OK 双击:OK 单击在 READY 无语义、在 HOME
-// 只翻页,双击叠在上面零误触(真机键位规则内已验证的组合)。
+// 物理键语义(2026-10-03 v2:HOME=菜单页 + 录音中设置浮层):
+// HOME(菜单)UP/DOWN = 选行,OK 单击 = 进入(语音输入/设置),OK 长按 = 切固件
+// (仅"切换固件"行,防误触用长按);READY 同 v1(双击 OK 进设置);
+// UP(音量加)= 按下即录、松开发送;常开麦期间 UP 双击 = 切提示音档位;
+// DOWN = 单击回车 / 长按清空(设置页内长按 = 退出);
+// 录音中(常开麦 LISTENING)双击 OK = 设置浮层,录音继续,退出回录音。
+// 同一颗键上只放"单击 + 长按",不放双击(见 app_state.c);OK 双击例外:
+// 其单击在 READY/HOME(菜单)/常开麦 LISTENING 均无副作用,双击叠加零误触。
 typedef enum {
     APP_BTN_UP = 0,
     APP_BTN_DOWN,
@@ -86,6 +87,8 @@ typedef enum {
     // 携带完整三元组(tone_level/night_mute/tz_hour):console 侧先经 main.c 访问器
     // 读当前值,改一项后整包投递 —— 归约器无需"部分更新"语义。
     APP_EV_SETTINGS_SET,
+    // ---- 双固件(2026-10-03 v2:HOME 菜单 + ota_0/ota_1 双槽)----
+    APP_EV_SLOT_PROBE,      // 开机槽位探测落地:u.slot_probe.present = ota_1 是否有可引导固件
 } app_event_type_t;
 
 // ---------------- 链路通道(双通道常开架构,2026-08-28) ----------------
@@ -168,6 +171,7 @@ typedef struct {
             uint8_t night_mute;                          // 0/1
             int8_t  tz_hour;                             // ±12
         } settings;                                      // SETTINGS_SET
+        struct { uint8_t present; } slot_probe;          // SLOT_PROBE(ota_1 有无可引导固件)
     } u;
 } app_event_t;
 
@@ -189,6 +193,7 @@ typedef enum {
     APP_ACT_PLAY_TONE,
     APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
     APP_ACT_SAVE_SETTINGS,   // 设置落地:NVS 三键 + time_sync_set_tz + app_sound_configure
+    APP_ACT_FW_SWITCH,       // 切固件:写 otadata 选另一槽 + 重启(2026-10-03 双槽 v2)
 } app_action_type_t;
 
 // 单事件最多产出的动作数。emit() 满了就静默丢弃,所以这个值必须 ≥ 最长的
@@ -215,6 +220,7 @@ typedef struct {
             uint8_t night_mute;                         // 0/1
             int8_t  tz_hour;                            // ±12
         } settings;                                     // SAVE_SETTINGS
+        struct { uint8_t slot; } fw_switch;             // FW_SWITCH(0=ota_0 语音,1=ota_1 另一固件)
     } u;
 } app_action_t;
 
@@ -244,6 +250,10 @@ typedef struct {
     uint8_t        settings_sel;    // 选中项索引(0=Sound 1=NightMute 2=Timezone)
     uint8_t        tone_level;      // tone_lvl_t
     uint8_t        night_mute;      // 0/1
+    // 双固件 v2(2026-10-03):HOME=菜单页 + 录音中设置浮层
+    uint8_t        menu_sel;        // HOME 菜单选中行(0=语音输入 1=设置 2=切固件)
+    uint8_t        slot_b_present;  // ota_1 有无可引导固件(开机探测;0/1)
+    uint8_t        settings_overlay; // 录音中设置浮层(state 仍 LISTENING,页渲染为设置)
 } app_ui_snapshot_t;
 
 // ---------------- 超时常量 ----------------

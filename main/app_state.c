@@ -168,6 +168,10 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->settings_sel = s->settings_sel;
     snap->tone_level   = s->tone_level;
     snap->night_mute   = s->night_mute;
+    // 双固件 v2(2026-10-03):HOME 菜单行 + 槽 B 在位 + 录音中设置浮层
+    snap->menu_sel         = s->menu_sel;
+    snap->slot_b_present   = s->slot_b_present;
+    snap->settings_overlay = s->settings_overlay;
     // 默认展示名仅在没有真实 agent.status 时兜底,不覆盖已存的 thinking/error 等
     if ((s->state == APP_ST_AGENT_RUNNING || s->state == APP_ST_TRANSCRIBING) &&
         snap->agent_state_name[0] == '\0') {
@@ -229,28 +233,35 @@ static void end_ptt(app_state_t *s, uint64_t now_ms,
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
+    s->settings_overlay = 0;   // 防御:任何进 READY 的路径都收掉浮层(理论不可达)
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
 }
 
 // ---- 设置页(2026-10-03)----
-// 进入:HOME/READY 下 OK 双击(锁定态不进 —— 锁定 = 盲操作省电模式,进入一个
-// 看不见的菜单只会留下"设备为什么不动了"的困惑)。
+// 进入:HOME 菜单选"设置"/READY 下 OK 双击(锁定态不进 —— 锁定 = 盲操作省电
+// 模式,进入一个看不见的菜单只会留下"设备为什么不动了"的困惑)。
 static void enter_settings(app_state_t *s, uint64_t now_ms,
                            app_action_t *out, uint8_t *n, uint8_t max) {
     s->state = APP_ST_SETTINGS;
     s->state_since_ms = now_ms;
     s->settings_sel = 0;
     s->settings_last_ms = now_ms;
+    s->settings_overlay = 0;   // 全状态设置页与浮层互斥(浮层入口只在 LISTENING)
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
 }
 
 // 退出:回 READY(工作页)。DOWN 长按 / OK 长按 / 10s 无操作三条路径共用。
+// 浮层(录音中设置)退出 = 只清标志回录音现场,state 保持 LISTENING 不动。
 static void exit_settings(app_state_t *s, uint64_t now_ms,
                           app_action_t *out, uint8_t *n, uint8_t max) {
-    s->state = APP_ST_READY;
-    s->state_since_ms = now_ms;
+    if (s->settings_overlay) {
+        s->settings_overlay = 0;
+    } else {
+        s->state = APP_ST_READY;
+        s->state_since_ms = now_ms;
+    }
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
 }
@@ -283,9 +294,47 @@ static void abort_to_ready(app_state_t *s, uint64_t now_ms, const char *toast,
     if (toast) set_toast(s, now_ms, toast);
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
+    s->settings_overlay = 0;   // 断链/中止收束浮层(录音现场已不存在)
     s->agent_state_name[0] = '\0';   // 清除旧的 agent 状态,防止 UI 残留
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
+}
+
+// 设置键公共语义(2026-10-03 v2):全状态设置页与录音浮层共用同一套 ——
+// UP/DOWN 单击选行(环绕),OK 单击切选中项值。返回 true = 事件被消费。
+// OK 长按退出 / 10s 无操作自动退出由调用方处理。
+static bool settings_click(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
+                           app_action_t *out, uint8_t *n, uint8_t max) {
+    if (ev->type != APP_EV_KEY_CLICK) return false;
+    const uint8_t b = ev->u.key.btn;
+    bool acted = true;
+    if (b == APP_BTN_UP) {
+        s->settings_sel = (uint8_t)((s->settings_sel + 2) % 3);   // 环绕上移
+    } else if (b == APP_BTN_DOWN) {
+        s->settings_sel = (uint8_t)((s->settings_sel + 1) % 3);   // 环绕下移
+    } else if (b == APP_BTN_OK) {
+        switch (s->settings_sel) {
+        case 0:   // Sound: HIGH → LOW → OFF 循环
+            cycle_tone_level(s, now_ms, out, n, max);
+            break;
+        case 1:   // Night Mute 21:30-7: 开 ↔ 关
+            s->night_mute = !s->night_mute;
+            save_settings(s, out, n, max);
+            break;
+        default:  // Timezone: +1 环绕 ±12
+            s->tz_hour = (int8_t)(s->tz_hour >= 12 ? -12 : s->tz_hour + 1);
+            save_settings(s, out, n, max);
+            break;
+        }
+    } else {
+        acted = false;
+    }
+    if (acted) {
+        s->settings_last_ms = now_ms;
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, n, max, r);
+    }
+    return acted;
 }
 
 static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
@@ -352,14 +401,17 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             //    PRESS)不唤醒但照常执行动作 —— 仅测试可达,非真实交互路径。
         }
 
-        // 锁定入口:亮屏的 HOME/READY 下长按 OK(0.5s 阈值)立即锁定息屏
-        // (背光灭 + 面板 SLPIN 断电,不等 60s 超时)。录音/转写/审批/Agent
-        // 运行中不可锁定;USB 模式手动锁定允许(显式操作,省电优先)。
+        // 锁定入口:亮屏的 READY(或 HOME 菜单非"切固件"行)下长按 OK(0.5s
+        // 阈值)立即锁定息屏(背光灭 + 面板 SLPIN 断电,不等 60s 超时)。录音/
+        // 转写/审批/Agent 运行中不可锁定;USB 模式手动锁定允许(显式操作,省电
+        // 优先)。菜单 FW 行例外:v2 起 OK 长按在该行 = 切固件(重启级操作独占
+        // 长按手势,与锁屏二选一;想锁屏先挪一行)。
         // 幽灵长按拦截(2026-08-29 对称性补齐,见 OK_PRESS_MIN_MV):回调时刻
         // mv 不在 OK 档 = 无人按键。上锁挡错的代价是"少锁一次",可以承受。
         if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
             !key_ev_is_fake(ev) &&
-            (s->state == APP_ST_HOME || s->state == APP_ST_READY) &&
+            (s->state == APP_ST_READY ||
+             (s->state == APP_ST_HOME && s->menu_sel != 2)) &&
             s->screen_on && s->panel_on &&
             now_ms - s->wake_ms > OK_LONG_GUARD_MS) {
             s->locked = true;
@@ -370,6 +422,34 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t p = { .type = APP_ACT_UI_PANEL_OFF };
             emit(out, n, max, p);
             return;
+        }
+    }
+
+    // 录音中设置浮层(2026-10-03 v2):常开麦录音时双击 OK 呼出,录音继续。
+    // 拦截放在 DOWN 长按全局分支之前 —— 浮层内 DOWN 长按 = 退出浮层,不是清空。
+    // 键位与设置页完全一致(settings_click 公共语义);退出 = 只清标志,state 仍
+    // LISTENING,录音/上行全程不动。入口门禁 mic_hold:PTT 录音按住 UP 时另一只
+    // 手双击 OK 的场景不存在(PTT 秒级),且浮层若在 PTT 中开启,UP 松开事件会被
+    // 浮层吞掉导致录音悬死 —— 入口收紧 + 下方防御双保险。
+    if (s->settings_overlay) {
+        if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_DOWN) {
+            exit_settings(s, now_ms, out, n, max);   // DOWN 长按 = 退出(替代清空)
+            return;
+        }
+        if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK && !key_ev_is_fake(ev)) {
+            exit_settings(s, now_ms, out, n, max);   // OK 长按 = 退出
+            return;
+        }
+        // 防御(入口门禁下理论不可达):PTT 录音中浮层未关,UP 松开先收浮层,
+        // 松开事件继续落到 LISTENING 正常收口(end_ptt / 误触收束),不 return。
+        if (!s->mic_hold && b == APP_BTN_UP &&
+            (ev->type == APP_EV_KEY_LONG_UP || ev->type == APP_EV_KEY_RELEASE)) {
+            s->settings_overlay = 0;
+        } else {
+            if (ev->type == APP_EV_KEY_CLICK) {
+                settings_click(s, ev, now_ms, out, n, max);
+            }
+            return;   // 浮层消费其余一切事件(PRESS/DOUBLE/LONG_UP 不漏到下层)
         }
     }
 
@@ -398,18 +478,39 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     }
 
     switch (s->state) {
-    case APP_ST_HOME:
-        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            go_ready(s, now_ms, out, n, max);
-        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
-            send_key_action(s, APP_KEY_ENTER, out, n, max);
-        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK && !s->locked) {
-            // OK 双击进设置(2026-10-03)。iot_button 单击先报:HOME 下先翻 READY
-            // (纯翻页,无副作用),双击事件随后到达时已在 READY 分支之外 ——
-            // 这里是 HOME 的入口;READY 的入口在下方。锁定态不进(见 enter_settings)。
-            enter_settings(s, now_ms, out, n, max);
+    case APP_ST_HOME: {
+        // 菜单首页(2026-10-03 v2):0=语音输入 1=设置 2=切固件(行常驻,
+        // 槽 B 空时行值显示 "--",长按给 toast,不隐藏 —— 导航逻辑恒 3 行最简)。
+        if (ev->type == APP_EV_KEY_CLICK && (b == APP_BTN_UP || b == APP_BTN_DOWN)) {
+            const int dir = (b == APP_BTN_DOWN) ? 1 : 2;   // +1 / -1 (mod 3)
+            s->menu_sel = (uint8_t)((s->menu_sel + dir) % 3);
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            if (s->menu_sel == 0) {
+                go_ready(s, now_ms, out, n, max);          // 语音输入(原 HOME→READY)
+            } else if (s->menu_sel == 1) {
+                enter_settings(s, now_ms, out, n, max);    // 设置
+            }
+            // menu_sel==2(切固件)OK 单击故意无动作:切换 = 重启级操作,
+            // 只认长按(下方),单击失手不会把用户甩进另一个固件。
+        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
+                   !key_ev_is_fake(ev) && s->menu_sel == 2) {
+            if (s->slot_b_present) {
+                app_action_t f = { .type = APP_ACT_FW_SWITCH };
+                f.u.fw_switch.slot = 1;   // → ota_1(main.c 写 otadata + 重启)
+                emit(out, n, max, f);
+            } else {
+                set_toast(s, now_ms, "Slot B: empty");
+                app_action_t t = { .type = APP_ACT_PLAY_TONE };
+                t.u.tone = APP_TONE_ERROR;
+                emit(out, n, max, t);
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
+            }
         }
         break;
+    }
 
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
@@ -455,6 +556,18 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         // 锁定态放行:夜间盲操作切静音正是本功能的主场景(锁定 = 息屏省电,不是输入锁)。
         if (s->mic_hold && ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_UP) {
             cycle_tone_level(s, now_ms, out, n, max);
+            break;
+        }
+        // 录音中设置浮层入口(2026-10-03 v2):OK 双击呼出设置,录音继续不收口。
+        // OK 单击在 LISTENING 全态无动作 → 双击叠加零误触(键位注释例外条款);
+        // 锁定态放行:浮层照常呼出,渲染由 screen_on 门禁跳过 —— 盲操作改设置
+        // 与"锁定下切音量档"同语义,口袋场景明确要的就是这个。
+        if (s->mic_hold && ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK) {
+            s->settings_overlay = 1;
+            s->settings_sel = 0;
+            s->settings_last_ms = now_ms;
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
             break;
         }
         // 松开立即结束并发送(无取消窗口)。按下即录之后两种松开事件都要收:
@@ -527,46 +640,19 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
-    case APP_ST_SETTINGS: {
-        // 设置页键位(2026-10-03):VOL± 单击 = 上下选项目;OK 单击 = 选中项
-        // 切换下一档;DOWN/OK 长按 = 退出(两条长按路径已在上方各自拦截/放行)。
-        // 所有有效操作刷新 settings_last_ms(10s 无操作自动退出,见 handle_tick)。
-        // DOWN 单击在设置内是"向下选项目"而非回车上行 —— 设置页不注入按键。
-        bool acted = false;
-        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
-            s->settings_sel = (uint8_t)((s->settings_sel + 2) % 3);   // 环绕上移
-            acted = true;
-        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
-            s->settings_sel = (uint8_t)((s->settings_sel + 1) % 3);   // 环绕下移
-            acted = true;
-        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
-            acted = true;
-            switch (s->settings_sel) {
-            case 0:   // Sound: HIGH → LOW → OFF 循环
-                cycle_tone_level(s, now_ms, out, n, max);
-                break;
-            case 1:   // Night Mute 21:30-7: 开 ↔ 关
-                s->night_mute = !s->night_mute;
-                save_settings(s, out, n, max);
-                break;
-            default:  // Timezone: +1 环绕 ±12
-                s->tz_hour = (int8_t)(s->tz_hour >= 12 ? -12 : s->tz_hour + 1);
-                save_settings(s, out, n, max);
-                break;
-            }
-        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK && !key_ev_is_fake(ev)) {
+    case APP_ST_SETTINGS:
+        // 设置页键位(2026-10-03 v2):VOL± 选行、OK 切值(settings_click
+        // 公共语义,录音浮层同款);OK 长按 = 退出;DOWN 长按退出在上方全局
+        // 分支(浮层块之后,设置全状态仍命中);10s 无操作自动退出(handle_tick)。
+        // DOWN 单击在设置内是"向下选行"而非回车上行 —— 设置页不注入按键。
+        if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK && !key_ev_is_fake(ev)) {
             // OK 长按退出:锁屏入口限 HOME/READY(见上方门禁),设置内长按空闲,
             // 收作退出 —— 幽灵门禁与上锁同口径(挡错代价 = 多按一次,可承受)。
             exit_settings(s, now_ms, out, n, max);
-            acted = true;
+            break;
         }
-        if (acted) {
-            s->settings_last_ms = now_ms;
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
-        }
+        settings_click(s, ev, now_ms, out, n, max);
         break;
-    }
 
     default:
         // AGENT_RUNNING:按键全部忽略(仅唤醒已在上面处理)
@@ -584,7 +670,9 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
 
     // 设置页无操作自动退出(2026-10-03):回 READY 工作页。先于息屏判定 ——
     // 10s 退出 < 20s 息屏,正常路径永远先离开设置再谈省电。
-    if (s->state == APP_ST_SETTINGS &&
+    // 录音浮层(2026-10-03 v2)同计时:超时只收浮层回录音现场(exit_settings
+    // 按 settings_overlay 分流),state 保持 LISTENING。
+    if ((s->state == APP_ST_SETTINGS || s->settings_overlay) &&
         now_ms - s->settings_last_ms >= APP_SETTINGS_IDLE_EXIT_MS) {
         exit_settings(s, now_ms, out, n, max);
     }
@@ -984,5 +1072,16 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         emit(out, out_n, max, r);
         break;
     }
+
+    // ---- 双固件槽位探测落地(2026-10-03 v2)----
+    // main.c 开机读 ota_1 头部扇区后投递;归约器只存标志,菜单行据此渲染
+    // "FW: B ✓/–",长按切固件时据此放行或 toast 拒绝。
+    case APP_EV_SLOT_PROBE:
+        s->slot_b_present = ev->u.slot_probe.present ? 1 : 0;
+        {
+            app_action_t r2 = { .type = APP_ACT_UI_REFRESH };
+            emit(out, out_n, max, r2);
+        }
+        break;
     }
 }

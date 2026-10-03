@@ -18,6 +18,8 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"  // IDF >= 5.5: esp_restart 声明移入 esp_system.h
+#include "esp_ota_ops.h"      // 双固件:运行槽查询 + otadata 切换(2026-10-03 v2)
+#include "esp_partition.h"    // 另一槽头部探测(app 描述符 magic)
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -422,6 +424,48 @@ static int cmd_night(int argc, char **argv)
     return 0;
 }
 
+// ---- 双固件(2026-10-03 v2):fw 查看当前槽与另一槽状态,fw a|b 切换重启 ----
+// 与菜单"长按 OK 切固件"同一执行路径(esp_ota_set_boot_partition + 重启)。
+static int cmd_fw(int argc, char **argv)
+{
+    const esp_partition_t *cur = esp_ota_get_running_partition();
+    if (argc < 2) {
+        out("fw: running %s\n", cur->label);
+        const esp_partition_t *next = esp_ota_get_next_update_partition(cur);
+        if (!next) {
+            out("fw: 另一槽不存在(分区表非双 OTA 布局?)\n");
+            return 1;
+        }
+        // 头部探测:分区 0x20 处 app 描述符 magic 0xABCD5432(LE 字节序 32 54 CD AB)
+        uint8_t magic[4] = {0};
+        if (esp_partition_read(next, 0x20, magic, sizeof(magic)) == ESP_OK &&
+            memcmp(magic, "\x32\x54\xcd\xab", 4) == 0) {
+            char ver[33] = {0};
+            esp_partition_read(next, 0x30, ver, sizeof(ver) - 1);   // version[32] @0x30
+            out("fw: 另一槽 %s: %s\n", next->label, ver);
+        } else {
+            out("fw: 另一槽 %s: 空\n", next->label);
+        }
+        return 0;
+    }
+    if (strcmp(argv[1], cur->label) == 0) {
+        out("fw: 已在 %s\n", cur->label);
+        return 0;
+    }
+    const esp_partition_t *next = esp_ota_get_next_update_partition(cur);
+    if (!next) {
+        out("fw: 切换失败,另一槽不存在\n");
+        return 1;
+    }
+    if (esp_ota_set_boot_partition(next) != ESP_OK) {
+        out("fw: otadata 写入失败\n");
+        return 1;
+    }
+    out("fw: 切到 %s,重启生效\n", next->label);
+    esp_restart();
+    return 0;
+}
+
 // ---- 命令表(REPL 注册与 SYS 执行共用)----
 // 注:模式切换命令(mode)已随双通道常开架构退役(2026-08-28)。
 static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
@@ -434,6 +478,7 @@ static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = 
     { "mic",     cmd_mic },
     { "snd",     cmd_snd },
     { "night",   cmd_night },
+    { "fw",      cmd_fw },
 };
 #define CMD_COUNT (sizeof(s_cmds) / sizeof(s_cmds[0]))
 
@@ -519,5 +564,6 @@ esp_err_t console_cmds_register(void)
     reg("mic", "常开麦克风模式:mic on | mic off(虚拟麦克风用)", NULL, cmd_mic);
     reg("snd", "提示音档位:snd [high|low|off]", NULL, cmd_snd);
     reg("night", "夜间静音 21:30-07:00:night [on|off]", NULL, cmd_night);
+    reg("fw", "双固件:fw 查看槽位 / fw a|b 切换并重启", NULL, cmd_fw);
     return ESP_OK;
 }

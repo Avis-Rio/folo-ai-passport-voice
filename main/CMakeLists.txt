@@ -27,4 +27,6 @@ idf_component_register(
              esp_pm       # 空闲 light sleep + CPU 变频(录音会话锁见 app_main)
              esp_driver_usb_serial_jtag
              esp_app_format   # 开机画面版本号 esp_app_get_description(2026-10-03;头文件 esp_app_desc.h)
+             app_update       # 双固件 v2:esp_ota_set_boot_partition(菜单切槽 2026-10-03)
+             esp_partition    # 槽位探测 esp_partition_read/find_first(菜单槽状态)
 )

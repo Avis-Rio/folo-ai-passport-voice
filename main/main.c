@@ -25,6 +25,8 @@
 #include "esp_pm.h"                     // 空闲 light sleep + 录音会话 PM 锁
 #include "driver/usb_serial_jtag.h"     // usb_serial_jtag_is_connected:USB 在位检测
 #include "esp_system.h"
+#include "esp_ota_ops.h"      // 双固件 v2:运行槽查询 + otadata 切换(2026-10-03)
+#include "esp_partition.h"    // ota_1 头部探测(菜单槽位状态)
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -151,6 +153,18 @@ void app_settings_current(uint8_t *lvl, uint8_t *night, int8_t *tz)
     if (lvl)    *lvl = s_state.tone_level;
     if (night)  *night = s_state.night_mute;
     if (tz)     *tz = s_state.tz_hour;
+}
+
+// 双固件槽位探测(2026-10-03 v2):ota_1 分区 0x20 处 app 描述符 magic
+// 0xABCD5432(LE 32 54 CD AB)= 有可引导固件。开机一次,结果经事件进归约器。
+static bool fw_slot_b_present(void)
+{
+    const esp_partition_t *p = esp_partition_find_first(
+        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+    if (!p) return false;
+    uint8_t magic[4] = {0};
+    if (esp_partition_read(p, 0x20, magic, sizeof(magic)) != ESP_OK) return false;
+    return memcmp(magic, "\x32\x54\xcd\xab", 4) == 0;
 }
 
 // ---- USB 在位检测:插 USB 时禁 light sleep ----
@@ -298,6 +312,25 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             app_sound_configure((tone_lvl_t)lvl, night);
             break;
         }
+        case APP_ACT_FW_SWITCH: {
+            // 双固件切换(2026-10-03 v2):otadata 指向另一 OTA 槽 + 立即重启。
+            // 入口:菜单"Firmware B"行长按(槽位在位已由归约器门禁,空槽 toast);
+            // 目标槽取"下一 OTA 槽"而非硬编码 —— 未来 >2 槽布局无需改执行器。
+            // 切换不对称性(见 README):另一固件若无切换菜单(如原厂),回来需连线刷。
+            const esp_partition_t *cur = esp_ota_get_running_partition();
+            const esp_partition_t *next = esp_ota_get_next_update_partition(cur);
+            if (!next) {
+                ESP_LOGE(TAG, "切固件失败: 另一 OTA 槽不存在");
+                break;
+            }
+            if (esp_ota_set_boot_partition(next) != ESP_OK) {
+                ESP_LOGE(TAG, "切固件失败: otadata 写入错误");
+                break;
+            }
+            ESP_LOGI(TAG, "切固件: %s → %s,重启生效", cur->label, next->label);
+            esp_restart();
+            break;
+        }
         case APP_ACT_PLAY_TONE:
             // S3:START 改异步播放,开流由 sound_worker 播完后的 TONE_DONE 事件驱动
             // (app_state 归约,分时语义保持:滴声先于采集)。app_task 不再阻塞 80ms。
@@ -369,6 +402,14 @@ static void app_task(void *arg)
         app_sound_configure((tone_lvl_t)lvl, night != 0);
         // 时区生效:time_sync_init 在 app_main 已按 NVS 装载;此处状态机镜像
         // 与之一致(若曾用 `time tz` 改过,两边同源无漂移)。
+    }
+    {
+        // 双固件槽位探测(2026-10-03 v2):ota_1 在位性进菜单行("Firmware B
+        // ready/--");flash 读 ~256B 一次性开销,开机完成后事件落地。
+        app_event_t probe = {0};
+        probe.type = APP_EV_SLOT_PROBE;
+        probe.u.slot_probe.present = fw_slot_b_present() ? 1 : 0;
+        app_event_post(&probe);
     }
     QueueHandle_t q = app_events_queue();
     uint64_t next_tick = esp_timer_get_time() / 1000;

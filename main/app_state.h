@@ -53,6 +53,11 @@ typedef struct {
     int8_t         tz_hour;            // 时区 ±12(缺省 8,与 time_sync 同源装载)
     uint8_t        settings_sel;       // 设置页选中项(0=Sound 1=NightMute 2=Timezone)
     uint64_t       settings_last_ms;   // 设置页最近按键时刻(10s 无操作自动退出)
+    // ---- 双固件 v2(2026-10-03):HOME=菜单页 + 录音中设置浮层 ----
+    uint8_t        menu_sel;           // HOME 菜单选中行(0=语音输入 1=设置 2=切固件)
+    uint8_t        slot_b_present;     // ota_1 有无可引导固件(APP_EV_SLOT_PROBE 落地)
+    uint8_t        settings_overlay;   // 录音中设置浮层:state 仍 LISTENING,键走设置、
+                                       // 页渲染设置;退出只清标志(录音/mic_hold 不动)
 } app_state_t;
 
 void app_state_init(app_state_t *s);
