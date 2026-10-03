@@ -1165,6 +1165,12 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             }
             break;
         }
+        // ASK 弹窗等待物理回答:看门狗的 mic on 重试预期失败,静默忽略 ——
+        // 不进 "MIC busy" toast(每 ~4.5s 一次会盖掉"所选选项"确认 toast,
+        // v2.4 真机首测踩中)。
+        if (s->state == APP_ST_ASK) {
+            break;
+        }
         // TRANSCRIBING / AGENT_RUNNING / APPROVAL:不与工作流抢音频
         set_toast(s, now_ms, "MIC busy");
         {

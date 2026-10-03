@@ -212,6 +212,16 @@ static void send_event_line(char *buf, size_t len)
     }
 }
 
+// 状态迁移日志用的短名(app_stage_t 顺序与 app_types.h 一致,单点在 types 注释)
+static const char *app_stage_name(app_stage_t st)
+{
+    static const char *const names[APP_ST_COUNT] = {
+        "HOME", "READY", "LISTENING", "TRANSCRIBING", "AGENT_RUNNING",
+        "APPROVAL", "ASK", "SETTINGS",
+    };
+    return (uint8_t)st < APP_ST_COUNT ? names[st] : "?";
+}
+
 // 会话边界帧(voice.start/end):BLE 阻塞入队 ≤200ms 不丢,防 Mac 端会话状态悬挂
 static void send_event_line_important(char *buf, size_t len)
 {
@@ -269,6 +279,10 @@ static void run_actions(const app_action_t *acts, uint8_t n)
                                             a->u.agent_action.task_id,
                                             a->u.agent_action.decision,
                                             a->u.agent_action.option);
+            // v2.4 取证:上行断点定位(choose 回传曾静默丢失)
+            ESP_LOGI("agent", "agent.action decision=%d opt=%d len=%d",
+                     (int)a->u.agent_action.decision,
+                     (int)a->u.agent_action.option, (int)len);
             send_event_line(buf, len);
             break;
         case APP_ACT_STREAM_START:
@@ -454,6 +468,14 @@ static void app_task(void *arg)
             const uint8_t st_before = (uint8_t)s_state.state;
             const bool scr_before = s_state.screen_on, lock_before = s_state.locked;
             app_state_reduce(&s_state, &ev, now_ms, acts, &n);
+            if ((uint8_t)s_state.state != st_before) {
+                // 状态迁移追踪(v2.4 取证):哪个事件把状态从哪迁到哪 ——
+                // ask 页"页面自己关了"类问题一眼定位。日志走控制台,st 同源。
+                ESP_LOGI("sm", "%s -> %s on ev=%d btn=%d",
+                         app_stage_name((app_stage_t)st_before),
+                         app_stage_name(s_state.state),
+                         (int)ev.type, (int)ev.u.key.btn);
+            }
             if (n > 0 || (uint8_t)s_state.state != st_before
                 || s_state.screen_on != scr_before || s_state.locked != lock_before
                 || pm_ev_is_link(ev.type)) {
