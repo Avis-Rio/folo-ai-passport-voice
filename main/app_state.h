@@ -58,6 +58,8 @@ typedef struct {
     uint8_t        slot_b_present;     // ota_1 有无可引导固件(APP_EV_SLOT_PROBE 落地)
     uint8_t        settings_overlay;   // 录音中设置浮层:state 仍 LISTENING,键走设置、
                                        // 页渲染设置;退出只清标志(录音/mic_hold 不动)
+    uint8_t        settings_return_home; // 设置退出去向:1=回菜单首页(从菜单进),
+                                           // 0=回 READY 工作页(从 READY 双击进)
 } app_state_t;
 
 void app_state_init(app_state_t *s);

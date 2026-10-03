@@ -991,10 +991,12 @@ static void test_locked_keys_operate_screen_off(void) {
 
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 60);    // UP 单击(READY 无分支)
     assert(on == 0);
-    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 70);    // OK 单击(READY 无分支)
-    assert(on == 0);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 70);    // OK 单击:回菜单(盲切页)
+    assert(s.state == APP_ST_HOME);
     assert(s.locked == true);
     assert(s.screen_on == false);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 75);    // 菜单行 0 单击:回 READY(盲)
+    assert(s.state == APP_ST_READY);
 
     reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 80);     // 再按 UP:照常开录
     assert(s.state == APP_ST_LISTENING);
@@ -2016,6 +2018,63 @@ static void test_menu_overlay_snapshot(void) {
     assert(snap.settings_overlay == 1);
 }
 
+// ---- 回菜单首页(2026-10-03 v2.1):READY 单击 OK / 录音中长按 OK ----
+static void test_back_to_menu(void) {
+    // READY 单击 OK → 菜单;再单击行 0 → READY(往返闭合)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // HOME row0 → READY
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 20);   // READY → HOME
+    assert(s.state == APP_ST_HOME);
+
+    // READY 双击 OK:宿主直发 DOUBLE → 设置,退出回 READY(非菜单入口)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    assert(s.state == APP_ST_SETTINGS);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 600);
+    assert(s.state == APP_ST_READY);                      // return_home=0
+
+    // 菜单内进设置(行 1):退出回菜单(return_home=1)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10); // → 行 1
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 20);
+    assert(s.state == APP_ST_SETTINGS);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 600);
+    assert(s.state == APP_ST_HOME);                       // 回菜单,不落 READY
+
+    // 菜单内 OK 双击:直接进设置,退出回菜单(双击 = 设置的全态心智)
+    reset();
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_SETTINGS);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 600);
+    assert(s.state == APP_ST_HOME);
+
+    // 常开麦录音中 OK 长按 → 菜单,录音不动(mic_hold 保持、无收口动作)
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    assert(s.state == APP_ST_LISTENING && s.mic_hold);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 1000);
+    assert(s.state == APP_ST_HOME);
+    assert(s.mic_hold == true);
+    assert(!has_action(APP_ACT_STREAM_CANCEL));
+    assert(!has_action(APP_ACT_STREAM_STOP));
+    assert(strstr(s.toast, "Menu") != NULL);
+    // 守护进程重发 mic on:HOME → READY → LISTENING 自动回语音界面
+    mic_ev(APP_EV_MIC_ON, now + 2000);
+    assert(s.state == APP_ST_LISTENING && s.mic_hold);
+
+    // 幽灵 OK 长按(松开电平)在录音中不回菜单
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_OK, 2890, now + 1000);
+    assert(s.state == APP_ST_LISTENING);
+}
+
 int main(void) {
     test_home_nav();
     test_down_enter_clear();
@@ -2062,6 +2121,7 @@ int main(void) {
     test_settings_snapshot();
     test_settings_overlay_listening();
     test_menu_overlay_snapshot();
+    test_back_to_menu();
     test_fake_key_is_not_activity();
     test_ok_long_lock_mv_gate();
     test_up_taps_never_clear();

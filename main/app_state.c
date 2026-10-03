@@ -233,7 +233,23 @@ static void end_ptt(app_state_t *s, uint64_t now_ms,
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
-    s->settings_overlay = 0;   // 防御:任何进 READY 的路径都收掉浮层(理论不可达)
+    s->settings_overlay = 0;        // 防御:任何进 READY 的路径都收掉浮层(理论不可达)
+    s->settings_return_home = 0;    // 设置去向标志随工作现场一起失效
+    app_action_t r = { .type = APP_ACT_UI_REFRESH };
+    emit(out, n, max, r);
+}
+
+// 回菜单首页(2026-10-03 v2.1):READY 单击 OK / 常开麦录音中长按 OK。
+// mic_hold 不动 —— 设备端没有请求守护进程停麦的通道,录音会话继续;
+// 菜单里迟到的转写文本按 HOME 门禁不上屏,回语音界面即恢复。守护进程
+// 重连重发 mic on 时 HOME → READY → start_ptt 自动回到语音界面(闭环)。
+static void go_home(app_state_t *s, uint64_t now_ms,
+                    app_action_t *out, uint8_t *n, uint8_t max) {
+    s->state = APP_ST_HOME;
+    s->state_since_ms = now_ms;
+    s->settings_overlay = 0;
+    s->settings_return_home = 0;
+    s->agent_state_name[0] = '\0';
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
 }
@@ -252,12 +268,16 @@ static void enter_settings(app_state_t *s, uint64_t now_ms,
     emit(out, n, max, r);
 }
 
-// 退出:回 READY(工作页)。DOWN 长按 / OK 长按 / 10s 无操作三条路径共用。
-// 浮层(录音中设置)退出 = 只清标志回录音现场,state 保持 LISTENING 不动。
+// 退出:去向按入口分流(2026-10-03 v2.1)—— 从菜单进的回菜单首页,从 READY
+// 双击进的回工作页;浮层(录音中设置)退出 = 只清标志回录音现场。
 static void exit_settings(app_state_t *s, uint64_t now_ms,
                           app_action_t *out, uint8_t *n, uint8_t max) {
     if (s->settings_overlay) {
         s->settings_overlay = 0;
+    } else if (s->settings_return_home) {
+        s->settings_return_home = 0;
+        s->state = APP_ST_HOME;
+        s->state_since_ms = now_ms;
     } else {
         s->state = APP_ST_READY;
         s->state_since_ms = now_ms;
@@ -294,7 +314,8 @@ static void abort_to_ready(app_state_t *s, uint64_t now_ms, const char *toast,
     if (toast) set_toast(s, now_ms, toast);
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
-    s->settings_overlay = 0;   // 断链/中止收束浮层(录音现场已不存在)
+    s->settings_overlay = 0;        // 断链/中止收束浮层(录音现场已不存在)
+    s->settings_return_home = 0;
     s->agent_state_name[0] = '\0';   // 清除旧的 agent 状态,防止 UI 残留
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
@@ -489,11 +510,19 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
             if (s->menu_sel == 0) {
                 go_ready(s, now_ms, out, n, max);          // 语音输入(原 HOME→READY)
-            } else if (s->menu_sel == 1) {
-                enter_settings(s, now_ms, out, n, max);    // 设置
+            } else if (s->menu_sel == 1 && !s->locked) {
+                s->settings_return_home = 1;               // 退出设置时回菜单
+                enter_settings(s, now_ms, out, n, max);    // 设置(锁定态不进,v1 规则)
             }
             // menu_sel==2(切固件)OK 单击故意无动作:切换 = 重启级操作,
             // 只认长按(下方),单击失手不会把用户甩进另一个固件。
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK && !s->locked) {
+            // 菜单内 OK 双击 = 直接进设置(2026-10-03 v2.1):保住"双击 OK =
+            // 设置"的全态心智 —— READY 双击的第一击先回菜单,双击事件落在
+            // 菜单,在这里收口(真实固件流多一次页面切换,键位表零变化)。
+            // 锁定态不进(与 READY 双击、菜单行 1 同一规则)。
+            enter_settings(s, now_ms, out, n, max);
+            s->settings_return_home = 1;
         } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
                    !key_ev_is_fake(ev) && s->menu_sel == 2) {
             if (s->slot_b_present) {
@@ -515,10 +544,16 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            // OK 单击 = 回菜单首页(2026-10-03 v2.1):菜单成了启动器,READY
+            // 必须有回去的路(此前只能开机见一次)。
+            go_home(s, now_ms, out, n, max);
         } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK && !s->locked) {
-            // OK 单击在 READY 无语义(上方 lock/唤醒分支之外零动作),双击叠上去
-            // 零误触零迟滞 —— 全键位里唯一安全的"双击"落点(见 app_types.h 键位注释)。
+            // OK 双击进设置(2026-10-03)。宿主直发 DOUBLE 走这里(测试路径);
+            // 真实固件流单击先行先回菜单,双击在菜单落地进设置 —— 殊途同归,
+            // 设置退出去向两者都标 return_home=0/1 各自入口(见 exit_settings)。
             enter_settings(s, now_ms, out, n, max);
+            s->settings_return_home = 0;
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
             // 音量加"按下即录"(2026-08-29,取代原先等 0.5s 长按判定):真机实测
             // 按下到真正 `采集开始` 要 ~1.01s —— 428ms 花在长按阈值上,另外 578ms
@@ -568,6 +603,15 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             s->settings_last_ms = now_ms;
             app_action_t r = { .type = APP_ACT_UI_REFRESH };
             emit(out, n, max, r);
+            break;
+        }
+        // OK 长按 = 回菜单首页(2026-10-03 v2.1):录音继续不收口(设备端没有
+        // 请求守护进程停麦的通道,mic_hold 不动),菜单行 0 / mic on 重握手随时
+        // 回语音界面。浮层打开时 OK 长按已被上方浮层拦截(退出浮层),不竞争。
+        if (s->mic_hold && ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK &&
+            !key_ev_is_fake(ev)) {
+            set_toast(s, now_ms, "Menu (mic on)");
+            go_home(s, now_ms, out, n, max);
             break;
         }
         // 松开立即结束并发送(无取消窗口)。按下即录之后两种松开事件都要收:
