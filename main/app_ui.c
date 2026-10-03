@@ -366,8 +366,10 @@ static void build_splash(void)
     label(s_splash, "AI PASSPORT", &lv_font_montserrat_20, UI_INK, 0, 92, W);
     ui_pixel_mascot_create(s_splash, 101, 140);   // 38x48,水平居中
     {
-        char ver[32];
-        snprintf(ver, sizeof(ver), "v%s",
+        char ver[24];
+        // 精度限定 %.20s:GCC -Wformat-truncation 可证明输出 ≤21B < 24,
+        // 版本串异常超长时截断显示(而非构建告警炸掉 -Werror)。
+        snprintf(ver, sizeof(ver), "v%.20s",
                  esp_app_get_description()->version);
         label(s_splash, ver, &lv_font_montserrat_14, UI_MUTED, 0, 210, W);
     }
