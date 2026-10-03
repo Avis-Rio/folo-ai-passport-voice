@@ -5,7 +5,7 @@
 #include "time_sync.h"       // 顶栏 HH:MM(校时源仅电脑客户端,未校时 "--:--");设置页时区
 #include "tone_policy.h"     // 设置页档位名(单点真源,UI 不自持一份)
 #include "ui_pixel.h"
-#include "esp_app_format.h"  // 开机画面版本号(esp_app_get_description)
+#include "esp_app_desc.h"    // 开机画面版本号(esp_app_get_description,IDF 5.5 头名)
 #include "lvgl.h"
 #include <stdarg.h>
 #include <stdio.h>
