@@ -53,6 +53,9 @@ typedef struct {
     lv_obj_t *set_values[3];              // SETTINGS:右侧当前值
     lv_obj_t *menu_panels[3];             // HOME 菜单:三行(语音输入/设置/固件)
     lv_obj_t *menu_values[3];             // HOME 菜单右侧(FW 槽状态)
+    lv_obj_t *ask_title;                  // ASK:标题(选项选择,物理审批器 v2.4)
+    lv_obj_t *ask_panels[APP_OPTS_MAX];   // ASK:选项行(高亮=选中)
+    lv_obj_t *ask_labels[APP_OPTS_MAX];   // ASK:选项文本
 } page_t;
 
 static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
@@ -169,7 +172,8 @@ static void build_chrome(void)
 
     // Toast(底部浮层,空文本即隐藏)
     lv_obj_t *tbg = block(s_chrome, 30, 272, 180, 30, UI_INK);
-    s_toast = label(tbg, "", &lv_font_montserrat_14, 0xFFFFFF, 0, 5, 180);
+    // toast 用 CJK 字库(含 ASCII):v2.4 起选项确认会把中文选项文本放进 toast
+    s_toast = label(tbg, "", &lv_font_cjk_14, 0xFFFFFF, 0, 5, 180);
 }
 
 // ---- 各状态页 ----
@@ -204,6 +208,37 @@ static void build_home(void)
     }
     // 键位提示:切固件是重启级操作,只认 OK 长按(单击在菜单第 2 行故意无动作)。
     hint_label(p->root, "VOL: SELECT   OK: OPEN   HOLD OK: FW");
+}
+
+// ---- 选项选择页(物理审批器 v2.4):标题(两行)+ 1~4 行选项,VOL± 移动高亮,
+// OK 确认,OK 长按整题拒绝。空选项行隐藏(count 不足时)。
+static void build_ask(void)
+{
+    page_t *p = &s_pages[APP_ST_ASK];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    p->ask_title = label(p->root, "", &lv_font_cjk_20, UI_INK, 12, CONTENT_Y + 4, 216);
+    lv_obj_set_style_text_align(p->ask_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(p->ask_title, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(p->ask_title, 54);
+
+    for (int i = 0; i < APP_OPTS_MAX; i++) {
+        const int y = 116 + i * 46;
+        p->ask_panels[i] = ui_pixel_panel_create(p->root, 12, y, 216, 40, UI_PAPER);
+        char num[4];
+        snprintf(num, sizeof(num), "%d", i + 1);
+        label(p->ask_panels[i], num, &lv_font_montserrat_14, UI_MUTED, 6, 10, 16);
+        lv_obj_t *txt = label(p->ask_panels[i], "", &lv_font_cjk_14, UI_INK, 26, 10, 182);
+        lv_obj_set_style_text_align(txt, LV_TEXT_ALIGN_LEFT, 0);
+        p->ask_labels[i] = txt;
+    }
+    hint_label(p->root, "VOL: MOVE   OK: PICK   HOLD OK: CANCEL");
 }
 
 static void build_ready(void)
@@ -448,6 +483,7 @@ esp_err_t app_ui_init(void)
     build_transcribing();
     build_running();
     build_approval();
+    build_ask();
     build_settings();
     for (int i = 0; i < APP_ST_COUNT; i++) {
         lv_obj_add_flag(s_pages[i].root, LV_OBJ_FLAG_HIDDEN);
@@ -536,6 +572,20 @@ void app_ui_render(const app_ui_snapshot_t *snap)
         label_set_fmt_if_changed(s_pages[APP_ST_APPROVAL].ap_target, "target: %s",
                                  snap->approval_target);
         label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
+        break;
+    }
+    case APP_ST_ASK: {
+        // 选项选择(物理审批器 v2.4):标题 + 选项行显隐 + 高亮选中行。
+        page_t *kp = &s_pages[APP_ST_ASK];
+        label_set_if_changed(kp->ask_title, snap->ask_title);
+        for (int i = 0; i < APP_OPTS_MAX; i++) {
+            const bool has = i < snap->ask_count;
+            set_hidden(kp->ask_panels[i], !has);
+            if (has) {
+                label_set_if_changed(kp->ask_labels[i], snap->ask_opts[i]);
+            }
+            ui_pixel_set_selected(kp->ask_panels[i], has && i == snap->ask_sel, true);
+        }
         break;
     }
     case APP_ST_SETTINGS: {

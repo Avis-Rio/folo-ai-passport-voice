@@ -103,7 +103,7 @@ static bool pm_ev_is_link(uint8_t t)
     case APP_EV_BLE_CONNECTED: case APP_EV_BLE_DISCONNECTED:
     case APP_EV_USB_CONNECTED: case APP_EV_USB_DISCONNECTED:
     case APP_EV_TRANSCRIPT:    case APP_EV_AGENT_STATUS:
-    case APP_EV_APPROVAL_REQUEST: case APP_EV_TIME_SET:
+    case APP_EV_APPROVAL_REQUEST: case APP_EV_ASK_REQUEST: case APP_EV_TIME_SET:
     case APP_EV_AUDIO_ERROR:   case APP_EV_BLE_DROP:
         return true;
     default:
@@ -267,7 +267,8 @@ static void run_actions(const app_action_t *acts, uint8_t n)
         case APP_ACT_SEND_AGENT_ACTION:
             len = app_protocol_agent_action(buf, sizeof(buf),
                                             a->u.agent_action.task_id,
-                                            a->u.agent_action.decision);
+                                            a->u.agent_action.decision,
+                                            a->u.agent_action.option);
             send_event_line(buf, len);
             break;
         case APP_ACT_STREAM_START:

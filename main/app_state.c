@@ -172,6 +172,13 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     snap->menu_sel         = s->menu_sel;
     snap->slot_b_present   = s->slot_b_present;
     snap->settings_overlay = s->settings_overlay;
+    // 物理审批器 v2.4:选项选择页
+    str_cpy(snap->ask_title, sizeof(snap->ask_title), s->ask_title);
+    for (uint8_t i = 0; i < s->ask_count && i < APP_OPTS_MAX; i++) {
+        str_cpy(snap->ask_opts[i], sizeof(snap->ask_opts[i]), s->ask_opts[i]);
+    }
+    snap->ask_count = s->ask_count;
+    snap->ask_sel   = s->ask_sel;
     // 默认展示名仅在没有真实 agent.status 时兜底,不覆盖已存的 thinking/error 等
     if ((s->state == APP_ST_AGENT_RUNNING || s->state == APP_ST_TRANSCRIBING) &&
         snap->agent_state_name[0] == '\0') {
@@ -319,6 +326,32 @@ static void abort_to_ready(app_state_t *s, uint64_t now_ms, const char *toast,
     s->agent_state_name[0] = '\0';   // 清除旧的 agent 状态,防止 UI 残留
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
+}
+
+// 物理审批器共享(审批页 + 选项页,2026-10-03):弹窗必须被看见 ——
+// 强制解锁 + 面板上电 + 亮背光 + 录音收束(管线不泄漏)。
+static void prompt_wake(app_state_t *s, uint64_t now_ms,
+                        app_action_t *out, uint8_t *out_n, uint8_t max) {
+    if (s->locked) {
+        s->locked = false;
+    }
+    if (!s->panel_on) {
+        s->panel_on = true;
+        app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
+        emit(out, out_n, max, p);
+    }
+    if (!s->screen_on) {
+        s->screen_on = true;
+        s->last_key_ms = now_ms;   // 唤醒即重置息屏计时(弹窗态本就常亮)
+        app_action_t sc = { .type = APP_ACT_UI_SCREEN_ON };
+        emit(out, out_n, max, sc);
+    }
+    if (s->state == APP_ST_LISTENING) {
+        app_action_t st = { .type = APP_ACT_STREAM_STOP };
+        emit(out, out_n, max, st);
+        app_action_t ve = { .type = APP_ACT_SEND_VOICE_END };
+        emit(out, out_n, max, ve);
+    }
 }
 
 // 设置键公共语义(2026-10-03 v2):全状态设置页与录音浮层共用同一套 ——
@@ -684,6 +717,43 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
+    case APP_ST_ASK:
+        // 物理审批器 v2.4:UP/DOWN 移动高亮(夹紧不环绕,选项少时直观),
+        // OK 单击确认当前项,OK 长按拒绝整题。决策后一律回 READY(外部请求
+        // 无 agent 会话,AGENT_RUNNING 会熄麦卡屏 —— 同审批 src=ext 语义)。
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
+            if (s->ask_sel > 0) {
+                s->ask_sel--;
+                emit(out, n, max, (app_action_t){ .type = APP_ACT_UI_REFRESH });
+            }
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            if (s->ask_sel + 1 < s->ask_count) {
+                s->ask_sel++;
+                emit(out, n, max, (app_action_t){ .type = APP_ACT_UI_REFRESH });
+            }
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            app_action_t a = { .type = APP_ACT_SEND_AGENT_ACTION };
+            str_cpy(a.u.agent_action.task_id, sizeof(a.u.agent_action.task_id), s->task_id);
+            a.u.agent_action.decision = APP_ACTION_CHOOSE;
+            a.u.agent_action.option = s->ask_sel;
+            emit(out, n, max, a);
+            s->ask_count = 0;
+            abort_to_ready(s, now_ms, NULL, out, n, max);
+            // toast 显示所选选项文本(中文;UI 侧 toast 字体已换 CJK)
+            set_toast(s, now_ms, s->ask_opts[s->ask_sel]);
+        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK) {
+            app_action_t a = { .type = APP_ACT_SEND_AGENT_ACTION };
+            str_cpy(a.u.agent_action.task_id, sizeof(a.u.agent_action.task_id), s->task_id);
+            a.u.agent_action.decision = APP_ACTION_REJECT;
+            emit(out, n, max, a);
+            app_action_t t = { .type = APP_ACT_PLAY_TONE };
+            t.u.tone = APP_TONE_REJECT;
+            emit(out, n, max, t);
+            s->ask_count = 0;
+            abort_to_ready(s, now_ms, "Canceled", out, n, max);
+        }
+        break;
+
     case APP_ST_TRANSCRIBING:
         // 音量+单击:退出转写场景(2026-08-28 用户需求)——不等识别结果,直接
         // 回 READY。迟到的识别文本由 APP_EV_TRANSCRIPT 的 READY/HOME 门禁丢弃。
@@ -875,27 +945,8 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         // 息屏/锁定收到审批:强制解锁 + 亮屏 + 面板上电 —— 审批必须被看见,
         // 防口袋盲批(与"APPROVAL 常亮不熄屏"政策一致)。物理审批器(v2.2)
         // 的外部请求多发生在息屏待机时,curl 一发屏幕就亮。
-        if (s->locked) {
-            s->locked = false;
-        }
-        if (!s->panel_on) {
-            s->panel_on = true;
-            app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
-            emit(out, out_n, max, p);
-        }
-        if (!s->screen_on) {
-            s->screen_on = true;
-            s->last_key_ms = now_ms;   // 唤醒即重置息屏计时(APPROVAL 本就常亮)
-            app_action_t sc = { .type = APP_ACT_UI_SCREEN_ON };
-            emit(out, out_n, max, sc);
-        }
+        prompt_wake(s, now_ms, out, out_n, max);
         // 审批打断录音:必须先停流,否则管线永远泄漏(APPROVAL 下没有按键能停它)
-        if (s->state == APP_ST_LISTENING) {
-            app_action_t st = { .type = APP_ACT_STREAM_STOP };
-            emit(out, out_n, max, st);
-            app_action_t ve = { .type = APP_ACT_SEND_VOICE_END };
-            emit(out, out_n, max, ve);
-        }
         str_cpy(s->task_id, sizeof(s->task_id), ev->u.approval.task_id);
         str_cpy(s->approval_title, sizeof(s->approval_title), ev->u.approval.title);
         str_cpy(s->approval_target, sizeof(s->approval_target), ev->u.approval.target);
@@ -909,6 +960,27 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         emit(out, out_n, max, t);
         app_action_t r = { .type = APP_ACT_UI_REFRESH };
         emit(out, out_n, max, r);
+        break;
+
+    case APP_EV_ASK_REQUEST:
+        // 物理审批器 v2.4:选项选择弹窗(多选一)。唤醒/打断语义与审批一致;
+        // ASK 态天然继承 APPROVAL 的常亮(息屏 idle_state 不含它)与无超时
+        // (handle_tick default 分支)—— 问题必须被回答。
+        prompt_wake(s, now_ms, out, out_n, max);
+        str_cpy(s->task_id, sizeof(s->task_id), ev->u.ask.task_id);
+        str_cpy(s->ask_title, sizeof(s->ask_title), ev->u.ask.title);
+        s->ask_count = ev->u.ask.opt_count;
+        if (s->ask_count < 1) s->ask_count = 1;
+        if (s->ask_count > APP_OPTS_MAX) s->ask_count = APP_OPTS_MAX;
+        for (uint8_t i = 0; i < s->ask_count; i++) {
+            str_cpy(s->ask_opts[i], sizeof(s->ask_opts[i]), ev->u.ask.opts[i]);
+        }
+        s->ask_sel = 0;
+        s->state = APP_ST_ASK;
+        s->state_since_ms = now_ms;
+        emit(out, out_n, max, (app_action_t){ .type = APP_ACT_PLAY_TONE,
+                                              .u.tone = APP_TONE_APPROVAL });
+        emit(out, out_n, max, (app_action_t){ .type = APP_ACT_UI_REFRESH });
         break;
 
     case APP_EV_TRANSCRIPT:

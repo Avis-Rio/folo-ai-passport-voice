@@ -97,6 +97,29 @@ static bool parse_approval(const cJSON *o, app_event_t *ev) {
     return true;
 }
 
+// 物理审批器 v2.4:选项选择。{"type":"agent.ask_request","taskId":..,"title":..,
+// "options":["..",".."]}。必填 taskId+title+options(1~4 项);标签超长截断,
+// 超过 4 项取前 4 项。
+static bool parse_ask_request(const cJSON *o, app_event_t *ev) {
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(o, "taskId");
+    const cJSON *ti = cJSON_GetObjectItemCaseSensitive(o, "title");
+    const cJSON *ops = cJSON_GetObjectItemCaseSensitive(o, "options");
+    if (!cJSON_IsString(id) || !cJSON_IsString(ti) || !cJSON_IsArray(ops)) return false;
+    int n = cJSON_GetArraySize(ops);
+    if (n < 1) return false;
+    if (n > APP_OPTS_MAX) n = APP_OPTS_MAX;
+    for (int i = 0; i < n; i++) {
+        const cJSON *it = cJSON_GetArrayItem(ops, i);
+        str_take(ev->u.ask.opts[i], sizeof(ev->u.ask.opts[i]),
+                 cJSON_IsString(it) ? it->valuestring : "");
+    }
+    str_take(ev->u.ask.task_id, sizeof(ev->u.ask.task_id), id->valuestring);
+    str_take(ev->u.ask.title, sizeof(ev->u.ask.title), ti->valuestring);
+    ev->u.ask.opt_count = (uint8_t)n;
+    ev->type = APP_EV_ASK_REQUEST;
+    return true;
+}
+
 static bool parse_transcript(const cJSON *o, app_event_t *ev) {
     const cJSON *tx = cJSON_GetObjectItemCaseSensitive(o, "text");
     if (!cJSON_IsString(tx)) return false;
@@ -147,6 +170,7 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
     if (cJSON_IsString(type)) {
         if      (strcmp(type->valuestring, "agent.status") == 0)         ok = parse_agent_status(root, ev);
         else if (strcmp(type->valuestring, "agent.approval_request") == 0) ok = parse_approval(root, ev);
+        else if (strcmp(type->valuestring, "agent.ask_request") == 0)      ok = parse_ask_request(root, ev);
         else if (strcmp(type->valuestring, "transcript") == 0)           ok = parse_transcript(root, ev);
         else if (strcmp(type->valuestring, "time.set") == 0)             ok = parse_time_set(root, ev);
         else if (strcmp(type->valuestring, "mic") == 0)                  ok = parse_mic(root, ev);
@@ -158,7 +182,8 @@ bool app_protocol_parse(const char *json, size_t len, app_event_t *ev) {
 
 void app_protocol_dispatch_event(const app_event_t *ev)
 {
-    if (ev->type == APP_EV_APPROVAL_REQUEST) {
+    if (ev->type == APP_EV_APPROVAL_REQUEST ||
+        ev->type == APP_EV_ASK_REQUEST) {
         app_event_post_important(ev, 100);   // 安全关键:满则等 100ms,不丢
     } else {
         app_event_post(ev);                  // 常规事件:零阻塞,满则丢(设计语义)
@@ -231,14 +256,18 @@ size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action) {
 }
 
 size_t app_protocol_agent_action(char *buf, size_t cap, const char *task_id,
-                                 uint8_t decision) {
+                                 uint8_t decision, uint8_t option) {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "event", "agent.action");
     cJSON_AddStringToObject(o, "taskId", task_id ? task_id : "");
     const char *act = "details";
     if (decision == APP_ACTION_APPROVE) act = "approve";
     else if (decision == APP_ACTION_REJECT) act = "reject";
+    else if (decision == APP_ACTION_CHOOSE) act = "choose";
     cJSON_AddStringToObject(o, "action", act);
+    if (decision == APP_ACTION_CHOOSE) {
+        cJSON_AddNumberToObject(o, "option", option);   // 0 起的下标,daemon 映射回文本
+    }
     size_t n = serialize(o, buf, cap);
     cJSON_Delete(o);
     return n;

@@ -24,6 +24,7 @@ typedef enum {
     APP_ST_TRANSCRIBING,    // 等待 Mac 转写
     APP_ST_AGENT_RUNNING,   // Agent 执行中
     APP_ST_APPROVAL,        // 待物理审批
+    APP_ST_ASK,             // 待选项选择(物理审批器 v2.4:UP/DOWN 导航,OK 确认)
     APP_ST_SETTINGS,        // 设置页(HOME/READY 下 OK 双击进入;2026-10-03)
     APP_ST_COUNT,
 } app_stage_t;
@@ -89,6 +90,8 @@ typedef enum {
     APP_EV_SETTINGS_SET,
     // ---- 双固件(2026-10-03 v2:HOME 菜单 + ota_0/ota_1 双槽)----
     APP_EV_SLOT_PROBE,      // 开机槽位探测落地:u.slot_probe.present = ota_1 是否有可引导固件
+    // ---- 物理审批器 · 选项选择(2026-10-03 v2.4:agent 多选一弹到设备)----
+    APP_EV_ASK_REQUEST,     // u.ask:标题 + 1~4 个选项,UP/DOWN 导航,OK 确认,OK 长按取消
 } app_event_type_t;
 
 // ---------------- 链路通道(双通道常开架构,2026-08-28) ----------------
@@ -130,6 +133,7 @@ typedef enum {
     APP_ACTION_APPROVE = 0,
     APP_ACTION_REJECT,
     APP_ACTION_DETAILS,
+    APP_ACTION_CHOOSE,      // 物理审批器 v2.4:选项选择(u.agent_action.option = 选项下标)
 } app_approval_decision_t;
 
 // 文本长度上限(Mac 端按条下发,设备仅显示)
@@ -138,6 +142,9 @@ typedef enum {
 #define APP_TITLE_MAX         64
 #define APP_TARGET_MAX        64
 #define APP_DIFF_MAX          64
+#define APP_OPT_MAX           33    // ask 选项标签上限(中文约 10 字;与 opts 4 项
+                                    // 恰好填满 240B 事件 —— sizeof(app_event_t) 不变,队列 RAM 零增长)
+#define APP_OPTS_MAX          4     // ask 选项数量上限(240x320 屏纵向空间)
 // 显示通道:须 ≥ APP_TRANSCRIPT_MAX,保证 relay 按 128B 切分的转写行完整落屏
 #define APP_AGENT_MSG_MAX     APP_TRANSCRIPT_MAX
 #define APP_TOAST_MAX         64
@@ -161,6 +168,12 @@ typedef struct {
             uint8_t risk;                               // app_risk_t
             uint8_t ext;                                // 物理审批器:src=="ext" → 决策后回 READY(非 AGENT_RUNNING)
         } approval;                                     // APPROVAL_REQUEST
+        struct {                                         // ASK_REQUEST(物理审批器 v2.4)
+            char task_id[APP_TASK_ID_MAX];
+            char title[APP_TITLE_MAX];
+            char opts[APP_OPTS_MAX][APP_OPT_MAX];        // 1~4 个选项标签
+            uint8_t opt_count;
+        } ask;                                           // 联合体扩到 ~264B(队列 8×~272B,C3 RAM 无压力)
         struct {
             char text[APP_TRANSCRIPT_MAX];
             uint8_t inject_mode;                        // app_inject_mode_t(协议兼容保留)
@@ -214,6 +227,7 @@ typedef struct {
         struct {
             char task_id[APP_TASK_ID_MAX];
             uint8_t decision;                           // app_approval_decision_t
+            uint8_t option;                             // CHOOSE:选中的选项下标
         } agent_action;                                 // SEND_AGENT_ACTION
         struct { int64_t epoch; } time_set;             // TIME_SET
         struct {
@@ -255,6 +269,11 @@ typedef struct {
     uint8_t        menu_sel;        // HOME 菜单选中行(0=语音输入 1=设置 2=切固件)
     uint8_t        slot_b_present;  // ota_1 有无可引导固件(开机探测;0/1)
     uint8_t        settings_overlay; // 录音中设置浮层(state 仍 LISTENING,页渲染为设置)
+    // 物理审批器 v2.4:选项选择页(state==APP_ST_ASK 时渲染)
+    char           ask_title[APP_TITLE_MAX];
+    char           ask_opts[APP_OPTS_MAX][APP_OPT_MAX];
+    uint8_t        ask_count;       // 1~APP_OPTS_MAX;0 = 无进行中的 ask
+    uint8_t        ask_sel;         // 当前高亮选项下标
 } app_ui_snapshot_t;
 
 // ---------------- 超时常量 ----------------

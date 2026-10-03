@@ -43,6 +43,11 @@ typedef struct {
     char           approval_diff[APP_DIFF_MAX];
     uint8_t        approval_risk;
     uint8_t        approval_ext;   // 物理审批器:src=="ext" 的外部请求 → 决策后回 READY(2026-10-03)
+    // ---- 物理审批器 · 选项选择(2026-10-03 v2.4)----
+    char           ask_title[APP_TITLE_MAX];
+    char           ask_opts[APP_OPTS_MAX][APP_OPT_MAX];
+    uint8_t        ask_count;      // 1~APP_OPTS_MAX;0 = 无进行中的 ask
+    uint8_t        ask_sel;        // 当前高亮选项下标
     bool           approval_details;   // ▼ 详情视图开关
     bool           mic_hold;           // 常开麦克风模式(console `mic on` 置位):
                                        // LISTENING 下吞掉物理 UP 松开与 60s 兜底,

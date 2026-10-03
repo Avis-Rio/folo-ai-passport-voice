@@ -28,9 +28,9 @@ size_t app_protocol_voice_start(char *buf, size_t cap, const char *audio_format)
 size_t app_protocol_voice_end(char *buf, size_t cap);
 // 上行按键动作(enter/clear,PC client 执行注入;见 key-remap 任务)
 size_t app_protocol_key_action(char *buf, size_t cap, app_key_action_t action);
-// decision: app_approval_decision_t (approve/reject/details)
+// decision: app_approval_decision_t (approve/reject/details/choose;choose 携带 option 下标)
 size_t app_protocol_agent_action(char *buf, size_t cap, const char *task_id,
-                                 uint8_t decision);
+                                 uint8_t decision, uint8_t option);
 // voice.end 后补发的会话对账帧: {"event":"status","drop":n}(掉帧对账,见 design.md)
 size_t app_protocol_device_status(char *buf, size_t cap, uint32_t drop_count);
 

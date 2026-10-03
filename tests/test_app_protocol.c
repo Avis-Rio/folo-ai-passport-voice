@@ -249,16 +249,36 @@ static void test_serialize(void) {
     assert(strstr(buf, "\"event\":\"key.action\""));
     assert(strstr(buf, "\"action\":\"clear\""));
 
-    n = app_protocol_agent_action(buf, sizeof(buf), "task_9821", APP_ACTION_APPROVE);
+    n = app_protocol_agent_action(buf, sizeof(buf), "task_9821", APP_ACTION_APPROVE, 0);
     assert(n > 0);
     assert(strstr(buf, "\"taskId\":\"task_9821\""));
     assert(strstr(buf, "\"action\":\"approve\""));
 
-    n = app_protocol_agent_action(buf, sizeof(buf), "t1", APP_ACTION_REJECT);
+    n = app_protocol_agent_action(buf, sizeof(buf), "t1", APP_ACTION_REJECT, 0);
     assert(strstr(buf, "\"action\":\"reject\""));
 
-    n = app_protocol_agent_action(buf, sizeof(buf), "t1", APP_ACTION_DETAILS);
+    n = app_protocol_agent_action(buf, sizeof(buf), "t1", APP_ACTION_DETAILS, 0);
     assert(strstr(buf, "\"action\":\"details\""));
+
+    // v2.4 选项选择:choose 携带 0 起的 option 下标;其余动作不带该字段
+    n = app_protocol_agent_action(buf, sizeof(buf), "ext-77", APP_ACTION_CHOOSE, 2);
+    assert(strstr(buf, "\"action\":\"choose\""));
+    assert(strstr(buf, "\"option\":2"));
+    n = app_protocol_agent_action(buf, sizeof(buf), "t1", APP_ACTION_APPROVE, 0);
+    assert(strstr(buf, "\"option\":") == NULL);
+
+    // v2.4 ask_request 下行解析:选项数组落地 + 缺 options 拒绝
+    {
+        const char *ask = "{\"type\":\"agent.ask_request\",\"taskId\":\"ext-9\","
+                          "\"title\":\"开始吗?\",\"options\":[\"确认\",\"调整\"]}";
+        app_event_t e = { 0 };
+        assert(app_protocol_parse(ask, strlen(ask), &e));
+        assert(e.type == APP_EV_ASK_REQUEST);
+        assert(e.u.ask.opt_count == 2);
+        assert(strcmp(e.u.ask.opts[1], "调整") == 0);
+        const char *nopts = "{\"type\":\"agent.ask_request\",\"taskId\":\"x\",\"title\":\"t\"}";
+        assert(!app_protocol_parse(nopts, strlen(nopts), &e));
+    }
 }
 
 static void test_serialize_small_cap(void) {

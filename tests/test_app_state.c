@@ -750,6 +750,70 @@ static void test_approval_wake(void) {
     assert(s.state == APP_ST_AGENT_RUNNING);
 }
 
+// ---- 选项选择(物理审批器 v2.4):导航夹紧/确认携带下标/长按拒绝/录音打断 ----
+static void test_ask_choose(void) {
+    reset();
+    s.link_up = true;
+    app_event_t ev = { .type = APP_EV_ASK_REQUEST,
+                       .u.ask = { .task_id = "ext-77", .title = "从 P0 开始吗?",
+                                  .opt_count = 2,
+                                  .opts = { "确认,按此范围开始", "调整目录或范围" } } };
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.state == APP_ST_ASK);
+    assert(s.ask_count == 2 && s.ask_sel == 0);
+    assert(strcmp(s.ask_opts[0], "确认,按此范围开始") == 0);
+
+    // DOWN → 1;再 DOWN 夹紧不越界;UP 回 0
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 10);
+    assert(s.ask_sel == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 20);
+    assert(s.ask_sel == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 30);
+    assert(s.ask_sel == 0);
+
+    // OK 确认:上行 choose + 选项下标,回 READY,toast = 所选文本
+    on = 0;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 40);
+    assert(s.state == APP_ST_READY && s.ask_count == 0);
+    app_action_t *a = find_action(APP_ACT_SEND_AGENT_ACTION);
+    assert(a && a->u.agent_action.decision == APP_ACTION_CHOOSE);
+    assert(a->u.agent_action.option == 0);
+    assert(strcmp(a->u.agent_action.task_id, "ext-77") == 0);
+    assert(strstr(s.toast, "确认") != NULL);
+
+    // OK 长按 = 整题拒绝:上行 reject + 拒绝音 + "Canceled"
+    app_state_reduce(&s, &ev, now + 50, out, &on);
+    assert(s.state == APP_ST_ASK);
+    on = 0;
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 60);
+    assert(s.state == APP_ST_READY);
+    a = find_action(APP_ACT_SEND_AGENT_ACTION);
+    assert(a && a->u.agent_action.decision == APP_ACTION_REJECT);
+    app_action_t *t = find_action(APP_ACT_PLAY_TONE);
+    assert(t && t->u.tone == APP_TONE_REJECT);
+    assert(strcmp(s.toast, "Canceled") == 0);
+
+    // 选项数防御:opt_count=0(坏输入)→ 夹到 1,页面至少有一项可选
+    reset();
+    app_event_t ev0 = { .type = APP_EV_ASK_REQUEST,
+                        .u.ask = { .task_id = "x", .title = "t", .opt_count = 0,
+                                   .opts = { "" } } };
+    app_state_reduce(&s, &ev0, now, out, &on);
+    assert(s.state == APP_ST_ASK && s.ask_count == 1);
+
+    // 录音中收到 ask:停流 + voice.end(与审批同语义,管线不泄漏)
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    assert(s.state == APP_ST_LISTENING);
+    on = 0;
+    app_state_reduce(&s, &ev, now + 300, out, &on);
+    assert(s.state == APP_ST_ASK);
+    assert(has_action(APP_ACT_STREAM_STOP));
+    assert(has_action(APP_ACT_SEND_VOICE_END));
+}
+
 // ---- 两级息屏/唤醒 ----
 // 20s 无键 → 关背光(screen_on=false, 面板仍通电);60s → 面板 SLPIN 断电;
 // PRESS 任意键 → 面板上电 + 背光亮。自动息屏只是省电显示态:唤醒后事件
@@ -2184,6 +2248,7 @@ int main(void) {
     test_agent_status_flow();
     test_approval();
     test_approval_wake();
+    test_ask_choose();
     test_approval_during_listening();
     test_screen_off_wake();
     test_screen_off_ready();
