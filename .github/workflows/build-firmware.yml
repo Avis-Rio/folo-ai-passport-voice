@@ -51,16 +51,25 @@ jobs:
           if idf.py merge-bin -o full.bin; then
             echo "idf.py merge-bin ok"
           else
-            # 回退:显式偏移合并(C3: bootloader 0x0 / 分区表 0x8000 / app 0x10000)
+            # 回退:显式偏移合并(C3: bootloader 0x0 / 分区表 0x8000 /
+            # app = 分区表 v2 的 ota_0 偏移 0x20000,改分区表必须同步改这里!)
             python "$IDF_PATH/components/esptool_py/esptool/esptool.py" \
               --chip esp32c3 merge_bin -o full.bin \
               --flash_mode dio --flash_size 8MB --flash_freq 80m \
               0x0     build/bootloader/bootloader.bin \
               0x8000  build/partition_table/partition-table.bin \
-              0x10000 build/FoloToy-AI-Passport.bin
+              0x20000 build/FoloToy-AI-Passport.bin
           fi
           ls -la full.bin
           sha256sum full.bin
+          # 落位自检:分区表 v2 的 ota_0 = 0x20000,app 必须出现在那里
+          # (防御 merge 偏移与 partitions.csv 脱节 —— 0x10000 旧布局会刷成砖启动失败)
+          python3 - <<'EOF'
+          data = open('full.bin', 'rb').read()
+          assert data[0x20000] == 0xE9, f"app 未落在 0x20000: {data[0x20000:0x20004].hex()}"
+          ver = data[0x20030:0x20050].split(b'\0')[0].decode(errors='replace')
+          print(f"✅ app @0x20000, version = {ver}")
+          EOF
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
