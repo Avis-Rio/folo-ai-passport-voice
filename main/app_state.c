@@ -4,6 +4,7 @@
 // link_channel = 会话路由通道(最近连接/使用,活动会话期间另一通道连接不夺路)。
 #include "app_state.h"
 #include "mode.h"
+#include "tone_policy.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -111,6 +112,17 @@ void app_state_init(app_state_t *s) {
     s->link_channel = APP_CHAN_BLE;   // 缺省 BLE(首通道连接前 PTT 门禁靠 link_up)
     s->locked = false;             // 开机未锁定
     s->wake_ms = 0;                // 无唤醒史 → 首个 OK LONG 不受 guard 限制
+    // 设置缺省(真机开机由 main.c 装载 NVS 值覆盖;宿主测试拿缺省即确定性基准)
+    s->tone_level = TONE_LVL_DEFAULT;
+    s->night_mute = 0;
+    s->tz_hour = 8;                // 与 time_sync/nvs_settings 缺省一致(Asia/Shanghai)
+}
+
+void app_state_load_settings(app_state_t *s, uint8_t tone_level, uint8_t night_mute,
+                             int8_t tz_hour) {
+    s->tone_level = (tone_level < TONE_LVL_COUNT) ? tone_level : TONE_LVL_DEFAULT;
+    s->night_mute = night_mute ? 1 : 0;
+    s->tz_hour = (tz_hour >= -12 && tz_hour <= 12) ? tz_hour : 8;
 }
 
 static void emit(app_action_t *out, uint8_t *n, uint8_t max, app_action_t a) {
@@ -152,6 +164,10 @@ void app_state_snapshot(const app_state_t *s, uint64_t now_ms, app_ui_snapshot_t
     if (s->toast[0] && s->toast_until_ms > 0) {
         str_cpy(snap->toast, sizeof(snap->toast), s->toast);
     }
+    // 设置页(2026-10-03):UI 按选中项渲染高亮与档位值
+    snap->settings_sel = s->settings_sel;
+    snap->tone_level   = s->tone_level;
+    snap->night_mute   = s->night_mute;
     // 默认展示名仅在没有真实 agent.status 时兜底,不覆盖已存的 thinking/error 等
     if ((s->state == APP_ST_AGENT_RUNNING || s->state == APP_ST_TRANSCRIBING) &&
         snap->agent_state_name[0] == '\0') {
@@ -213,6 +229,51 @@ static void end_ptt(app_state_t *s, uint64_t now_ms,
 static void go_ready(app_state_t *s, uint64_t now_ms, app_action_t *out, uint8_t *n, uint8_t max) {
     s->state = APP_ST_READY;
     s->state_since_ms = now_ms;
+    app_action_t r = { .type = APP_ACT_UI_REFRESH };
+    emit(out, n, max, r);
+}
+
+// ---- 设置页(2026-10-03)----
+// 进入:HOME/READY 下 OK 双击(锁定态不进 —— 锁定 = 盲操作省电模式,进入一个
+// 看不见的菜单只会留下"设备为什么不动了"的困惑)。
+static void enter_settings(app_state_t *s, uint64_t now_ms,
+                           app_action_t *out, uint8_t *n, uint8_t max) {
+    s->state = APP_ST_SETTINGS;
+    s->state_since_ms = now_ms;
+    s->settings_sel = 0;
+    s->settings_last_ms = now_ms;
+    app_action_t r = { .type = APP_ACT_UI_REFRESH };
+    emit(out, n, max, r);
+}
+
+// 退出:回 READY(工作页)。DOWN 长按 / OK 长按 / 10s 无操作三条路径共用。
+static void exit_settings(app_state_t *s, uint64_t now_ms,
+                          app_action_t *out, uint8_t *n, uint8_t max) {
+    s->state = APP_ST_READY;
+    s->state_since_ms = now_ms;
+    app_action_t r = { .type = APP_ACT_UI_REFRESH };
+    emit(out, n, max, r);
+}
+
+// 持久化动作:三元组整包落地(NVS + tz + 声音策略在 main.c 执行)。
+// 幂等:值没变也照发 —— NVS set 同值不磨损新页,换取路径单一。
+static void save_settings(app_state_t *s, app_action_t *out, uint8_t *n, uint8_t max) {
+    app_action_t a = { .type = APP_ACT_SAVE_SETTINGS };
+    a.u.settings.tone_level = s->tone_level;
+    a.u.settings.night_mute = s->night_mute;
+    a.u.settings.tz_hour    = s->tz_hour;
+    emit(out, n, max, a);
+}
+
+// 切提示音档位(HIGH→LOW→OFF→HIGH)并持久化 + toast 反馈当前档。
+// 两条路径共用:设置页 OK 单击(选中 Sound 项)/ 常开麦时 UP 双击快捷手势。
+static void cycle_tone_level(app_state_t *s, uint64_t now_ms,
+                             app_action_t *out, uint8_t *n, uint8_t max) {
+    s->tone_level = (uint8_t)tone_policy_next((tone_lvl_t)s->tone_level);
+    char msg[32];
+    snprintf(msg, sizeof(msg), "Sound: %s", tone_policy_name((tone_lvl_t)s->tone_level));
+    set_toast(s, now_ms, msg);
+    save_settings(s, out, n, max);
     app_action_t r = { .type = APP_ACT_UI_REFRESH };
     emit(out, n, max, r);
 }
@@ -313,6 +374,8 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     }
 
     // DOWN(音量减)长按 0.5s = 清空输入框(全局语义,各态统一,锁定/息屏下也生效)。
+    // 设置页内例外(2026-10-03):长按 = 退出设置 —— "清空输入框"对一个菜单页没有
+    // 意义,而设置页需要一条低延迟退出路径(与 OK 长按双出口)。
     // 与同一颗键的"单击 = 回车"天然互斥:iot_button 一旦判成长按,这一按就只报
     // LONG_PRESS_START/LONG_PRESS_UP,不再补报 SINGLE_CLICK —— 想清空的时候绝不会
     // 先把内容发出去(这正是"清空放双击"做不到的一点,见文件头键位注释)。
@@ -321,6 +384,10 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     // 开录音的滴声同理(这是阈值确认音,不是状态音,不违反"转写期静音")。
     if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_DOWN) {
         if (key_ev_is_fake(ev)) {   // 等价于 mv >= PTT_FAKE_LONG_MV,口径集中在一处
+            return;
+        }
+        if (s->state == APP_ST_SETTINGS) {
+            exit_settings(s, now_ms, out, n, max);
             return;
         }
         send_key_action(s, APP_KEY_CLEAR, out, n, max);
@@ -336,12 +403,21 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             go_ready(s, now_ms, out, n, max);
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK && !s->locked) {
+            // OK 双击进设置(2026-10-03)。iot_button 单击先报:HOME 下先翻 READY
+            // (纯翻页,无副作用),双击事件随后到达时已在 READY 分支之外 ——
+            // 这里是 HOME 的入口;READY 的入口在下方。锁定态不进(见 enter_settings)。
+            enter_settings(s, now_ms, out, n, max);
         }
         break;
 
     case APP_ST_READY:
         if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
+        } else if (ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_OK && !s->locked) {
+            // OK 单击在 READY 无语义(上方 lock/唤醒分支之外零动作),双击叠上去
+            // 零误触零迟滞 —— 全键位里唯一安全的"双击"落点(见 app_types.h 键位注释)。
+            enter_settings(s, now_ms, out, n, max);
         } else if (ev->type == APP_EV_KEY_PRESS && b == APP_BTN_UP) {
             // 音量加"按下即录"(2026-08-29,取代原先等 0.5s 长按判定):真机实测
             // 按下到真正 `采集开始` 要 ~1.01s —— 428ms 花在长按阈值上,另外 578ms
@@ -372,6 +448,15 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         break;
 
     case APP_ST_LISTENING:
+        // 常开麦快捷手势(2026-10-03):UP(音量+)双击 = 循环切换提示音档位。
+        // 只在 mic_hold 下开放 —— 常开麦期间物理 UP 的全部事件本就被吞(键完全
+        // 空闲),双击是白捡的快捷键;普通 PTT 录音中 UP 被按下即录占用,双击的
+        // 第一按就会开/收一次录音,此手势必须缺席(下方 break 前的门禁)。
+        // 锁定态放行:夜间盲操作切静音正是本功能的主场景(锁定 = 息屏省电,不是输入锁)。
+        if (s->mic_hold && ev->type == APP_EV_KEY_DOUBLE && b == APP_BTN_UP) {
+            cycle_tone_level(s, now_ms, out, n, max);
+            break;
+        }
         // 松开立即结束并发送(无取消窗口)。按下即录之后两种松开事件都要收:
         // 超过驱动 500ms 阈值的一按报 LONG_PRESS_UP(随后还有一条 RELEASE),
         // 短按只报 RELEASE。谁先到谁结束,后到的那条已落在别的状态里被忽略。
@@ -442,6 +527,47 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         }
         break;
 
+    case APP_ST_SETTINGS: {
+        // 设置页键位(2026-10-03):VOL± 单击 = 上下选项目;OK 单击 = 选中项
+        // 切换下一档;DOWN/OK 长按 = 退出(两条长按路径已在上方各自拦截/放行)。
+        // 所有有效操作刷新 settings_last_ms(10s 无操作自动退出,见 handle_tick)。
+        // DOWN 单击在设置内是"向下选项目"而非回车上行 —— 设置页不注入按键。
+        bool acted = false;
+        if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
+            s->settings_sel = (uint8_t)((s->settings_sel + 2) % 3);   // 环绕上移
+            acted = true;
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
+            s->settings_sel = (uint8_t)((s->settings_sel + 1) % 3);   // 环绕下移
+            acted = true;
+        } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_OK) {
+            acted = true;
+            switch (s->settings_sel) {
+            case 0:   // Sound: HIGH → LOW → OFF 循环
+                cycle_tone_level(s, now_ms, out, n, max);
+                break;
+            case 1:   // Night Mute 21:30-7: 开 ↔ 关
+                s->night_mute = !s->night_mute;
+                save_settings(s, out, n, max);
+                break;
+            default:  // Timezone: +1 环绕 ±12
+                s->tz_hour = (int8_t)(s->tz_hour >= 12 ? -12 : s->tz_hour + 1);
+                save_settings(s, out, n, max);
+                break;
+            }
+        } else if (ev->type == APP_EV_KEY_LONG && b == APP_BTN_OK && !key_ev_is_fake(ev)) {
+            // OK 长按退出:锁屏入口限 HOME/READY(见上方门禁),设置内长按空闲,
+            // 收作退出 —— 幽灵门禁与上锁同口径(挡错代价 = 多按一次,可承受)。
+            exit_settings(s, now_ms, out, n, max);
+            acted = true;
+        }
+        if (acted) {
+            s->settings_last_ms = now_ms;
+            app_action_t r = { .type = APP_ACT_UI_REFRESH };
+            emit(out, n, max, r);
+        }
+        break;
+    }
+
     default:
         // AGENT_RUNNING:按键全部忽略(仅唤醒已在上面处理)
         break;
@@ -456,7 +582,14 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
         emit(out, n, max, r);
     }
 
-    // 分级息屏:HOME/READY 下无按键(APPROVAL 保持常亮:安全审批不熄屏)
+    // 设置页无操作自动退出(2026-10-03):回 READY 工作页。先于息屏判定 ——
+    // 10s 退出 < 20s 息屏,正常路径永远先离开设置再谈省电。
+    if (s->state == APP_ST_SETTINGS &&
+        now_ms - s->settings_last_ms >= APP_SETTINGS_IDLE_EXIT_MS) {
+        exit_settings(s, now_ms, out, n, max);
+    }
+
+    // 分级息屏:HOME/READY/SETTINGS 下无按键(APPROVAL 保持常亮:安全审批不熄屏)
     // 20s → 关背光(渲染跳过,面板冻结最后一帧);60s → 面板 SLPIN 断电(μA 级)。
     // 背光关后 tick 仍需走到面板判定,故不提前 return。
     // USB 主机在位(有线供电)不熄屏:屏幕常亮,省电只针对无线场景(用户需求)。
@@ -465,7 +598,8 @@ static void handle_tick(app_state_t *s, uint64_t now_ms, app_action_t *out, uint
     const bool idle_state = !mode_wired() &&
                             !s->locked &&
                             (s->state == APP_ST_HOME ||
-                             s->state == APP_ST_READY);
+                             s->state == APP_ST_READY ||
+                             s->state == APP_ST_SETTINGS);
     if (idle_state) {
         if (s->screen_on && (now_ms - s->last_key_ms) >= APP_IDLE_BACKLIGHT_OFF_MS) {
             s->screen_on = false;
@@ -782,13 +916,14 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     // ---- 常开麦克风模式(console `mic on|off` 经 SYS 帧下行,2026-10-02)----
 
     case APP_EV_MIC_ON:
-        // HOME 先进 READY(RESET 后设备停在 HOME,守护进程连上即 mic on,
-        // 不应要求人工先按 OK);READY 直接走与 PTT 相同的 start_ptt
+        // HOME/SETTINGS 先进 READY(RESET 后设备停在 HOME、设置是低频临时页,
+        // 守护进程连上即 mic on,不应等人工退出;设置被抢占后未保存项已随每次
+        // 切换即时持久化,无丢失),READY 直接走与 PTT 相同的 start_ptt
         // (OFFLINE toast / 滴声 → voice.start → TONE_DONE 开流,零新路径)。
         // mic_hold 只在真正进入 LISTENING 时置位 —— 离线时 start_ptt 原地
         // 不动,不留"悬空 hold"(链路恢复也不该自动开麦,由看门狗重发)。
         // 已在 mic_hold 的 LISTENING = 重复 mic on,幂等忽略。
-        if (s->state == APP_ST_HOME) {
+        if (s->state == APP_ST_HOME || s->state == APP_ST_SETTINGS) {
             go_ready(s, now_ms, out, out_n, max);
         }
         if (s->state == APP_ST_READY) {
@@ -831,5 +966,23 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             s->mic_hold = false;
         }
         break;
+
+    // ---- 设置下发(console `snd`/`night`,2026-10-03)----
+    // 三元组整包覆盖(携带方已读当前值改单项,见 app_types.h 注释),与设置页
+    // 的 SAVE_SETTINGS 同一条持久化路径 —— 归约器无"部分更新"分支。
+    // 任意状态可下发(调试通道,不受页面态约束);值域越界逐项兜底。
+    case APP_EV_SETTINGS_SET: {
+        uint8_t lvl = ev->u.settings.tone_level;
+        if (lvl >= TONE_LVL_COUNT) lvl = TONE_LVL_DEFAULT;
+        s->tone_level = lvl;
+        s->night_mute = ev->u.settings.night_mute ? 1 : 0;
+        if (ev->u.settings.tz_hour >= -12 && ev->u.settings.tz_hour <= 12) {
+            s->tz_hour = ev->u.settings.tz_hour;
+        }
+        save_settings(s, out, out_n, max);
+        app_action_t r = { .type = APP_ACT_UI_REFRESH };
+        emit(out, out_n, max, r);
+        break;
+    }
     }
 }

@@ -2,8 +2,10 @@
 #include "app_ui.h"
 #include "bsp_battery.h"     // 电量(主循环已把真实值补进快照,此处仅渲染)
 #include "bsp_display.h"
-#include "time_sync.h"       // 顶栏 HH:MM(校时源仅电脑客户端,未校时 "--:--")
+#include "time_sync.h"       // 顶栏 HH:MM(校时源仅电脑客户端,未校时 "--:--");设置页时区
+#include "tone_policy.h"     // 设置页档位名(单点真源,UI 不自持一份)
 #include "ui_pixel.h"
+#include "esp_app_format.h"  // 开机画面版本号(esp_app_get_description)
 #include "lvgl.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -41,6 +43,8 @@ typedef struct {
     lv_obj_t *ap_title;                   // APPROVAL:标题
     lv_obj_t *ap_target;                  // APPROVAL:目标
     lv_obj_t *ap_diff;                    // APPROVAL:摘要/详情
+    lv_obj_t *set_panels[3];              // SETTINGS:三行选项面板(高亮=选中)
+    lv_obj_t *set_values[3];              // SETTINGS:右侧当前值
 } page_t;
 
 static lv_obj_t *s_chrome;                // 顶层容器(lv_layer_top)
@@ -177,8 +181,10 @@ static void build_home(void)
     // 后文字才真正水平居中于面板(此前偏右 7px)。
     label(plate, "VOICE INPUT", &lv_font_montserrat_20, UI_INK, -7, -2, 200);
     ui_pixel_mascot_create(p->root, 101, 100);
-    label(p->root, "hold OK to enter", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
-    hint_label(p->root, "OK: ENTER   DBL-VOL+: CLEAR   DOWN: ENTER");
+    label(p->root, "tap OK to start", &lv_font_montserrat_14, UI_MUTED, 0, 200, W);
+    // 键位提示(2026-10-03 修正):旧文案 "DBL-VOL+: CLEAR" 是 2026-08 前的键位
+    // (清空已迁 DOWN 长按);补上设置入口。
+    hint_label(p->root, "OK: READY   DBL-OK: SETTINGS");
 }
 
 static void build_ready(void)
@@ -194,7 +200,14 @@ static void build_ready(void)
 
     // 工作流切换已取消(固定 build),READY 为简单就绪页
     label(p->root, "READY", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 24, W);
-    hint_label(p->root, "HOLD VOL+: SPEAK   DOWN: ENTER   DBL-VOL+: CLEAR");
+    // 键位速查(2026-10-03):旧单行 hint 塞不下真实键位还带着过时的
+    // "DBL-VOL+: CLEAR"(清空自 2026-08-29 起在 DOWN 长按)—— 改为四行速查,
+    // 与实际状态机语义一一对应(app_state.c handle_key)。
+    label(p->root, "HOLD VOL+ : TALK", &lv_font_montserrat_14, UI_MUTED, 0, 168, W);
+    label(p->root, "TAP VOL- : ENTER", &lv_font_montserrat_14, UI_MUTED, 0, 192, W);
+    label(p->root, "HOLD VOL- : CLEAR", &lv_font_montserrat_14, UI_MUTED, 0, 216, W);
+    label(p->root, "DOUBLE OK : SETTINGS", &lv_font_montserrat_14, UI_MUTED, 0, 240, W);
+    hint_label(p->root, "HOLD VOL+ TO SPEAK");
 }
 
 static void build_listening(void)
@@ -279,10 +292,86 @@ static void build_approval(void)
     hint_label(p->root, "OK: APPROVE   VOL+: REJECT   DOWN: ENTER");
 }
 
+// ---- 设置页(2026-10-03):三行选项,选中高亮,右侧当前值 ----
+// 行内布局:name 左对齐 118px | value 右对齐 68px(面板 pad 7,内容区 186px)。
+static void build_settings(void)
+{
+    page_t *p = &s_pages[APP_ST_SETTINGS];
+    p->root = lv_obj_create(s_bg);   // 基底屏的子对象:切换只显隐,不动活动屏
+    lv_obj_remove_flag(p->root, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(p->root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p->root, 0, 0);
+    lv_obj_set_style_pad_all(p->root, 0, 0);
+    lv_obj_set_size(p->root, W, H);
+    lv_obj_set_pos(p->root, 0, 0);
+
+    label(p->root, "SETTINGS", &lv_font_montserrat_20, UI_INK, 0, CONTENT_Y + 8, W);
+
+    static const char *const names[3] = {
+        "Sound", "Night 21:30-7", "Timezone",
+    };
+    for (int i = 0; i < 3; i++) {
+        const int y = 104 + i * 48;
+        p->set_panels[i] = ui_pixel_panel_create(p->root, 20, y, 200, 36, UI_PAPER);
+        lv_obj_t *name = label(p->set_panels[i], names[i], &lv_font_montserrat_14,
+                               UI_INK, 0, 6, 118);
+        lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_LEFT, 0);
+        p->set_values[i] = label(p->set_panels[i], "-", &lv_font_montserrat_14,
+                                 UI_INK, 118, 6, 68);
+        lv_obj_set_style_text_align(p->set_values[i], LV_TEXT_ALIGN_RIGHT, 0);
+    }
+    hint_label(p->root, "VOL: MOVE   OK: CHANGE   HOLD OK: EXIT");
+}
+
 static void set_hidden(lv_obj_t *o, bool hidden)
 {
     if (hidden) lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+// ---- 开机画面(2026-10-03):品牌 + mascot + 版本号,1.2s 单次自灭 ----
+// 挂在 layer_top(chrome 同层,创建在后 → 盖住顶栏/横幅/所有页);LVGL timer
+// 回调跑在 LVGL 任务上下文,删对象/删定时器不需要 app_task 的锁。
+// 状态机不参与:启动前 3s 按键本就被 ADC 防腐蚀门禁忽略(button_adc_set_ignore_until),
+// splash 期间用户按键无副作用;到点自灭,无需事件。
+static lv_obj_t *s_splash;
+#define SPLASH_MS 1200
+
+static void splash_dismiss(lv_timer_t *t)
+{
+    if (s_splash) {
+        lv_obj_delete(s_splash);
+        s_splash = NULL;
+    }
+    lv_timer_delete(t);   // 单次:自删
+}
+
+static void build_splash(void)
+{
+    s_splash = lv_obj_create(s_chrome);
+    lv_obj_remove_flag(s_splash, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_splash, 0, 0);
+    lv_obj_set_size(s_splash, W, H);
+    lv_obj_set_style_radius(s_splash, 0, 0);
+    lv_obj_set_style_border_width(s_splash, 0, 0);
+    lv_obj_set_style_pad_all(s_splash, 0, 0);
+    lv_obj_set_style_bg_color(s_splash, lv_color_hex(UI_SKY), 0);
+
+    // 云(与基底屏同一视觉语言,ui_pixel_screen_create 同款)
+    block(s_splash, 189, 15, 43, 10, UI_INK);
+    block(s_splash, 193, 12, 35, 10, 0xFFFFFF);
+    block(s_splash, 200, 8, 10, 9, 0xFFFFFF);
+    block(s_splash, 215, 9, 9, 8, 0xFFFFFF);
+
+    label(s_splash, "AI PASSPORT", &lv_font_montserrat_20, UI_INK, 0, 92, W);
+    ui_pixel_mascot_create(s_splash, 101, 140);   // 38x48,水平居中
+    {
+        char ver[32];
+        snprintf(ver, sizeof(ver), "v%s",
+                 esp_app_get_description()->version);
+        label(s_splash, ver, &lv_font_montserrat_14, UI_MUTED, 0, 210, W);
+    }
+    lv_timer_create(splash_dismiss, SPLASH_MS, NULL);
 }
 
 // U1 dirty-check:文本未变则跳过 set_text。set_text 会重排标签并标记整行
@@ -338,10 +427,12 @@ esp_err_t app_ui_init(void)
     build_transcribing();
     build_running();
     build_approval();
+    build_settings();
     for (int i = 0; i < APP_ST_COUNT; i++) {
         lv_obj_add_flag(s_pages[i].root, LV_OBJ_FLAG_HIDDEN);
     }
     show_page(APP_ST_HOME);
+    build_splash();   // 最后建:盖在 chrome 之上,1.2s 自灭
     return ESP_OK;
 }
 
@@ -410,6 +501,20 @@ void app_ui_render(const app_ui_snapshot_t *snap)
         label_set_fmt_if_changed(s_pages[APP_ST_APPROVAL].ap_target, "target: %s",
                                  snap->approval_target);
         label_set_if_changed(s_pages[APP_ST_APPROVAL].ap_diff, snap->approval_diff);
+        break;
+    }
+    case APP_ST_SETTINGS: {
+        // 选中高亮(ui_pixel_set_selected:黄底=选中,纸底=未选)+ 右侧当前值。
+        // 档位名走 tone_policy 单点真源;时区直接读 time_sync(app_ui 已依赖)。
+        page_t *sp = &s_pages[APP_ST_SETTINGS];
+        const uint8_t lvl = snap->tone_level < TONE_LVL_COUNT ? snap->tone_level
+                                                              : TONE_LVL_DEFAULT;
+        for (int i = 0; i < 3; i++) {
+            ui_pixel_set_selected(sp->set_panels[i], i == snap->settings_sel, true);
+        }
+        label_set_if_changed(sp->set_values[0], tone_policy_name((tone_lvl_t)lvl));
+        label_set_if_changed(sp->set_values[1], snap->night_mute ? "ON" : "OFF");
+        label_set_fmt_if_changed(sp->set_values[2], "UTC%+d", time_sync_tz_hour());
         break;
     }
     default:

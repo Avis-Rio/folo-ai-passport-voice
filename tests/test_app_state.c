@@ -97,14 +97,18 @@ static void test_home_nav(void) {
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_CLEAR);
 
-    // 三颗键的双击一律无语义(清空已从 UP 双击迁到 DOWN 长按,2026-08-29)
-    for (int i = 0; i < 3; i++) {
-        const app_btn_t b[] = { APP_BTN_UP, APP_BTN_DOWN, APP_BTN_OK };
+    // ▼/▲ 双击无语义;● 双击 = 进设置(2026-10-03,状态切走是有意行为 ——
+    // 旧断言"三键双击一律停在 HOME"随之收窄到 ▼/▲)
+    for (int i = 0; i < 2; i++) {
+        const app_btn_t b[] = { APP_BTN_UP, APP_BTN_DOWN };
         reset();
         reduce_btn(APP_EV_KEY_DOUBLE, b[i], now + 10);
         assert(s.state == APP_ST_HOME);
         assert(!has_action(APP_ACT_SEND_KEY_ACTION));
     }
+    reset();
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 10);
+    assert(s.state == APP_ST_SETTINGS);               // ● 双击:进设置(防御路径,真实流先经 READY)
 
     // ▲ 空闲:无切换、无动作
     reset();
@@ -1648,6 +1652,242 @@ static void test_mic_busy_during_ptt(void) {
     assert(strstr(s.toast, "MIC busy"));
 }
 
+// ---- 设置页(2026-10-03:OK 双击进入 / VOL± 选项 / OK 切档 / 长按退出)----
+
+// 进入与退出:READY 双击进入(主路径);HOME 双击进入(防御路径);DOWN 长按在
+// 设置内 = 退出(不得触发全局清空);OK 长按 = 退出(不得触发锁屏)。
+static void test_settings_enter_exit(void) {
+    // 主路径:READY 下 OK 双击(OK 单击在 READY 本无语义,零误触)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);   // HOME → READY
+    assert(s.state == APP_ST_READY);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    assert(s.state == APP_ST_SETTINGS);
+    assert(s.settings_sel == 0);
+    assert(has_action(APP_ACT_UI_REFRESH));
+
+    // DOWN 长按:退出设置,绝不发 CLEAR 上行(设置页清空输入框没有意义)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_DOWN, now + 600);
+    assert(s.state == APP_ST_READY);
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));         // 无清空、无回车
+    assert(!has_action(APP_ACT_PLAY_TONE));               // 无清空确认音
+
+    // OK 长按:退出设置,不锁屏(锁屏入口限 HOME/READY)
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    assert(s.state == APP_ST_SETTINGS);
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 600);
+    assert(s.state == APP_ST_READY);
+    assert(s.locked == false);
+
+    // 幽灵 OK 长按(松开电平 2890)在设置内:既不退出也不产生动作
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    reduce_btn_mv(APP_EV_KEY_LONG, APP_BTN_OK, 2890, now + 600);
+    assert(s.state == APP_ST_SETTINGS);
+
+    // 锁定态不进设置(盲操作省电模式,不该进一个看不见的菜单)
+    reset();
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 10);    // HOME 下锁定
+    assert(s.locked == true);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    assert(s.state == APP_ST_HOME);                       // 未进入
+    assert(s.locked == true);                             // 仍锁定
+}
+
+// 导航与切档:VOL± 环绕三行;OK 切选中项的值;SAVE_SETTINGS 携带三元组。
+static void test_settings_navigate_adjust(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    assert(s.state == APP_ST_SETTINGS);
+
+    // 选中下移 0→1→2→0(环绕)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 600);
+    assert(s.settings_sel == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 700);
+    assert(s.settings_sel == 2);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 800);
+    assert(s.settings_sel == 0);
+    // 上移环绕 0→2
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 900);
+    assert(s.settings_sel == 2);
+
+    // Timezone(+1 环绕):缺省 8 → OK 单击 → 9;拨到 +12 再点 → -12
+    assert(s.tz_hour == 8);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1000);   // 切 tz
+    assert(s.tz_hour == 9);
+    s.tz_hour = 12;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1100);
+    assert(s.tz_hour == -12);
+    app_action_t *a = find_action(APP_ACT_SAVE_SETTINGS);
+    assert(a && a->u.settings.tz_hour == -12);
+    assert(a->u.settings.tone_level == s.tone_level);
+    assert(a->u.settings.night_mute == s.night_mute);
+
+    // Night Mute:开 ↔ 关
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 1200);   // sel → 0
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 1300);   // sel → 1
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1400);
+    assert(s.night_mute == 1);
+    a = find_action(APP_ACT_SAVE_SETTINGS);
+    assert(a && a->u.settings.night_mute == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1500);
+    assert(s.night_mute == 0);
+
+    // Sound(选中第 0 行):HIGH → LOW → OFF → HIGH,每次 SAVE + toast
+    // (此刻 sel=1(Night),DOWN×2:1→2→0)
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 1600);    // sel → 2
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 1700);    // sel → 0
+    assert(s.settings_sel == 0);
+    assert(s.tone_level == 2);                                // 缺省 HIGH
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 1900);
+    assert(s.tone_level == 1);
+    assert(strstr(s.toast, "LOW"));
+    a = find_action(APP_ACT_SAVE_SETTINGS);
+    assert(a && a->u.settings.tone_level == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 2000);
+    assert(s.tone_level == 0);
+    assert(strstr(s.toast, "OFF"));
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 2100);
+    assert(s.tone_level == 2);
+    assert(strstr(s.toast, "HIGH"));
+
+    // DOWN 单击在设置内 = 移动选中,不是回车上行(设置页不注入按键)
+    assert(!has_action(APP_ACT_SEND_KEY_ACTION));
+}
+
+// 10s 无操作自动退出;差 1ms 不退;退出前的最后一次按键刷新计时。
+static void test_settings_timeout(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    const uint64_t t0 = s.settings_last_ms;
+    assert(t0 > 0);
+    reduce(APP_EV_TICK, t0 + APP_SETTINGS_IDLE_EXIT_MS - 1);  // 差 1ms
+    assert(s.state == APP_ST_SETTINGS);
+    reduce(APP_EV_TICK, t0 + APP_SETTINGS_IDLE_EXIT_MS);      // 到点
+    assert(s.state == APP_ST_READY);
+}
+
+// 设置页息屏门禁:SETTINGS 计入 idle_state(20s 背光/60s 面板,与 HOME/READY 同)。
+// 直接推进 settings_last_ms 构造"仍在设置页但早过了按键时刻"的窗口(自动退出
+// 在 settings_last_ms+10s,背光在 last_key_ms+20s —— 两个计时器独立可分辨)。
+static void test_settings_idle_screen_off(void) {
+    reset();
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    const uint64_t k0 = s.last_key_ms;
+    s.settings_last_ms = k0 + 15000;   // 模拟 15s 时又按过设置键(刷新了退出计时)
+    reduce(APP_EV_TICK, k0 + APP_IDLE_BACKLIGHT_OFF_MS + 1);
+    assert(s.state == APP_ST_SETTINGS);   // 未到 settings_last_ms+10s,仍在设置
+    assert(s.screen_on == false);         // 但背光按 last_key_ms 计时已熄
+}
+
+// 常开麦优先:设置页收到 mic on → 放弃设置直接开录(守护进程连上即 mic on)。
+static void test_settings_mic_on_priority(void) {
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_OK, now + 500);
+    assert(s.state == APP_ST_SETTINGS);
+    mic_ev(APP_EV_MIC_ON, now + 600);
+    assert(s.state == APP_ST_LISTENING);
+    assert(s.mic_hold == true);
+    assert(has_action(APP_ACT_SEND_VOICE_START));
+    assert(!strstr(s.toast, "MIC busy"));   // 不是拒绝路径
+}
+
+// 常开麦快捷手势:UP(音量+)双击循环切档 + SAVE + toast;
+// 普通 PTT 录音中同手势必须缺席(第一按已开录,双击会变成两次录音误触)。
+static void test_mic_hold_double_cycles_tone(void) {
+    // 常开麦中:HIGH → LOW → OFF,toast 反馈,持久化
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    assert(s.state == APP_ST_LISTENING && s.mic_hold);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1000);
+    assert(s.tone_level == 1);
+    assert(strstr(s.toast, "LOW"));
+    assert(has_action(APP_ACT_SAVE_SETTINGS));
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 2000);
+    assert(s.tone_level == 0);
+    assert(strstr(s.toast, "OFF"));
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 3000);
+    assert(s.tone_level == 2);
+    assert(strstr(s.toast, "HIGH"));
+    assert(s.state == APP_ST_LISTENING);   // 录音不受切档影响
+    assert(s.mic_hold == true);
+
+    // 锁定 + 常开麦:盲操作切静音(夜间主场景)同样生效,且不亮屏
+    // (锁定 = 息屏省电模式;LISTENING 中 OK LONG 本就不可锁,直接构造锁定态)
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    s.locked = true;
+    s.screen_on = false;
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1000);
+    assert(s.tone_level == 1);               // 切档生效
+    assert(s.screen_on == false);            // 不亮屏(锁定语义保持)
+    assert(s.state == APP_ST_LISTENING);
+
+    // 普通 PTT(非 mic_hold):UP 双击不切档(手势缺席,防误触)
+    reset();
+    s.link_up = true;
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 10);
+    reduce_btn(APP_EV_KEY_PRESS, APP_BTN_UP, now + 20);
+    assert(s.state == APP_ST_LISTENING && !s.mic_hold);
+    reduce_btn(APP_EV_KEY_DOUBLE, APP_BTN_UP, now + 1000);
+    assert(s.tone_level == 2);                     // 未变
+    assert(!has_action(APP_ACT_SAVE_SETTINGS));
+}
+
+// console 下行(SETTINGS_SET):三元组整包覆盖,越界兜底,产出 SAVE_SETTINGS。
+static void test_settings_set_event(void) {
+    reset();
+    app_event_t ev = { .type = APP_EV_SETTINGS_SET,
+                       .u.settings = { .tone_level = 0, .night_mute = 1, .tz_hour = 9 } };
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.tone_level == 0);
+    assert(s.night_mute == 1);
+    assert(s.tz_hour == 9);
+    app_action_t *a = find_action(APP_ACT_SAVE_SETTINGS);
+    assert(a && a->u.settings.tone_level == 0);
+    assert(a && a->u.settings.night_mute == 1);
+    assert(a && a->u.settings.tz_hour == 9);
+    assert(has_action(APP_ACT_UI_REFRESH));
+
+    // 越界值:档位兜底 HIGH,tz 越界保留原值,night 任意非 0 规整为 1
+    ev.u.settings.tone_level = 7;
+    ev.u.settings.night_mute = 3;
+    ev.u.settings.tz_hour = 13;
+    app_state_reduce(&s, &ev, now, out, &on);
+    assert(s.tone_level == 2);
+    assert(s.night_mute == 1);
+    assert(s.tz_hour == 9);
+}
+
+// 快照:设置页字段随快照输出(UI 渲染契约)。
+static void test_settings_snapshot(void) {
+    reset();
+    s.state = APP_ST_SETTINGS;
+    s.settings_sel = 2;
+    s.tone_level = 1;
+    s.night_mute = 1;
+    app_ui_snapshot_t snap;
+    app_state_snapshot(&s, now, &snap);
+    assert(snap.settings_sel == 2);
+    assert(snap.tone_level == 1);
+    assert(snap.night_mute == 1);
+}
+
 int main(void) {
     test_home_nav();
     test_down_enter_clear();
@@ -1684,6 +1924,14 @@ int main(void) {
     test_mic_swallows_release();
     test_mic_link_down_clears_hold();
     test_mic_busy_during_ptt();
+    test_settings_enter_exit();
+    test_settings_navigate_adjust();
+    test_settings_timeout();
+    test_settings_idle_screen_off();
+    test_settings_mic_on_priority();
+    test_mic_hold_double_cycles_tone();
+    test_settings_set_event();
+    test_settings_snapshot();
     test_fake_key_is_not_activity();
     test_ok_long_lock_mv_gate();
     test_up_taps_never_clear();

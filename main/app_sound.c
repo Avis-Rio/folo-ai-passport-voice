@@ -1,6 +1,9 @@
 // main/app_sound.c —— 提示音实现。
 // 每个音由一个或多个方波段组成(频率×时长),段间无缝衔接。
 // 全部走 16kHz/16bit/单声道 —— 与录音流同格式,bsp_audio_set_format 只调一次。
+// 播放策略(2026-10-03):档位/夜间静音门禁在 app_sound_play 入口判定,
+// 被拒的音直接返回 false 不入队 —— START 音的调用方(main.c)对 false 的
+// 兜底是"立即开流",静音时段开麦反而零延迟。音量按档位在每次播放前设置。
 #include "app_sound.h"
 #include "app_events.h"
 #include "bsp_audio.h"
@@ -8,12 +11,29 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "time_sync.h"   // time_sync_local_minutes:夜窗判定的时间源
 
 static const char *TAG = "app_sound";
 
 #define SAMPLE_RATE 16000
 #define CHUNK_SAMPLES 256   // 每块 ~16ms,控制栈上临时缓冲
 #define AMPLITUDE 5000      // 方波幅度(±),低于 demo 的 6000 稍柔和
+
+// ---- 播放策略缓存:app_task 写(configure),本模块读 ----
+// volatile 单标量:单核 ESP32-C3 上无撕裂;夜窗分钟数在播放时刻实取(跨界即生效)。
+static volatile tone_lvl_t s_lvl = TONE_LVL_DEFAULT;
+static volatile bool s_night_mute = false;
+
+void app_sound_configure(tone_lvl_t lvl, bool night_mute)
+{
+    if ((int)lvl < 0 || (int)lvl >= TONE_LVL_COUNT) lvl = TONE_LVL_DEFAULT;
+    s_lvl = lvl;
+    s_night_mute = night_mute;
+    ESP_LOGI(TAG, "提示音策略: 档位=%s 夜间静音=%d", tone_policy_name(lvl),
+             night_mute ? 1 : 0);
+}
+
+tone_lvl_t app_sound_level(void) { return s_lvl; }
 
 // ---- 音色表:各音 = 若干 {频率Hz, 时长ms} 段 ----
 typedef struct { uint16_t hz; uint16_t ms; } tone_seg_t;
@@ -67,6 +87,8 @@ static void sound_worker(void *arg) {
     uint8_t tone;
     for (;;) {
         if (xQueueReceive(s_queue, &tone, portMAX_DELAY) == pdTRUE) {
+            // 音量按档位在播放时刻设置(配置变更对下一声即时生效,无需清队列)。
+            bsp_audio_set_volume(tone_policy_volume(s_lvl));
             play_tone_impl((app_tone_t)tone);
             // START 音播完 → 通知 app_task 开流(分时语义:滴声先于采集)。
             // 其余音不需要,不产生事件。
@@ -114,6 +136,13 @@ esp_err_t app_sound_init(void) {
 }
 
 bool app_sound_play(app_tone_t tone) {
+    // 策略门禁(2026-10-03):档位 OFF / 夜间静音窗口内 → 不播,返回 false。
+    // START 音调用方(main.c run_actions)对 false 的既有兜底是"立即开流"
+    // —— 静音时段开麦不等滴声,延迟反而更低;其余音的调用方不消费返回值,
+    // 静默跳过即所要的语义(夜里就是不想听)。
+    if (!tone_policy_allow(s_lvl, s_night_mute, time_sync_local_minutes())) {
+        return false;
+    }
     if (xQueueSend(s_queue, &tone, 0) != pdTRUE) {
         ESP_LOGW(TAG, "提示音队列满,丢弃 %d", (int)tone);
         return false;
@@ -122,5 +151,9 @@ bool app_sound_play(app_tone_t tone) {
 }
 
 void app_sound_play_sync(app_tone_t tone) {
+    if (!tone_policy_allow(s_lvl, s_night_mute, time_sync_local_minutes())) {
+        return;
+    }
+    bsp_audio_set_volume(tone_policy_volume(s_lvl));
     play_tone_impl(tone);
 }

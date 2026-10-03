@@ -56,11 +56,11 @@ esp_err_t time_sync_set_tz(int hour)
 
 // 本地时间 = 当前系统时钟 + tz*3600,按 UTC 读(gmtime_r 手动偏移,不依赖
 // TZ env)。设备端系统时钟 set_epoch 时已 settimeofday,持续走时;宿主测试
-// 无系统时钟,按 s_epoch 基线直接格式化(确定性基准)。返回写入长度
-// (未校时固定 "--:--" 5 字符)。
-int time_sync_format_local(char *buf, size_t cap)
+// 无系统时钟,按 s_epoch 基线直接格式化(确定性基准)。
+// local_tm():format_local 与 local_minutes 共用的取时路径(两处语义必须一致,
+// 否则顶栏显示 07:05 而夜窗按 06:58 判 —— 集中一处防漂移)。
+static void local_tm(struct tm *out)
 {
-    if (!s_valid) return snprintf(buf, cap, "--:--");
     time_t t;
 #ifdef ESP_PLATFORM
     time_t now = time(NULL);
@@ -69,7 +69,24 @@ int time_sync_format_local(char *buf, size_t cap)
 #else
     t = (time_t)(s_epoch + (int64_t)s_tz_hour * 3600);
 #endif
+    gmtime_r(&t, out);
+}
+
+// 返回写入长度(未校时固定 "--:--" 5 字符)。
+int time_sync_format_local(char *buf, size_t cap)
+{
+    if (!s_valid) return snprintf(buf, cap, "--:--");
     struct tm tm;
-    gmtime_r(&t, &tm);
+    local_tm(&tm);
     return snprintf(buf, cap, "%02d:%02d", tm.tm_hour, tm.tm_min);
+}
+
+// 本地时间自午夜起的分钟数(夜间静音窗口判定用,tone_policy)。未校时 -1:
+// 与 UI "--:--" 同一语义 —— 没有可信时间就不做时间相关决策。
+int time_sync_local_minutes(void)
+{
+    if (!s_valid) return -1;
+    struct tm tm;
+    local_tm(&tm);
+    return tm.tm_hour * 60 + tm.tm_min;
 }

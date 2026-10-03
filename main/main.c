@@ -12,6 +12,7 @@
 #include "console_cmds.h"
 #include "mode.h"
 #include "nvs_settings.h"
+#include "tone_policy.h"
 #include "usb_link.h"
 #include "time_sync.h"
 #include "bsp_audio.h"
@@ -141,6 +142,15 @@ bool app_pm_gate_state(uint32_t *idle_ms)
         *idle_ms = (uint32_t)(now - s_pm_act_ms);
     }
     return s_pm_act_held;
+}
+
+// 供 console(`snd`/`night`)读当前设置三元组(改一项后整包投 SETTINGS_SET;
+// app_task 单写,读侧容忍撕裂 —— 与 app_pm_gate_state 同一模式)
+void app_settings_current(uint8_t *lvl, uint8_t *night, int8_t *tz)
+{
+    if (lvl)    *lvl = s_state.tone_level;
+    if (night)  *night = s_state.night_mute;
+    if (tz)     *tz = s_state.tz_hour;
 }
 
 // ---- USB 在位检测:插 USB 时禁 light sleep ----
@@ -276,6 +286,18 @@ static void run_actions(const app_action_t *acts, uint8_t n)
             // 校时落地:写系统时间 + 置校时标志(app_task 上下文,单写点)
             time_sync_set_epoch(a->u.time_set.epoch);
             break;
+        case APP_ACT_SAVE_SETTINGS: {
+            // 设置落地(2026-10-03):NVS 三键 + 时区生效 + 声音策略即时更新。
+            // 每次整包写(幂等):设置是低频用户操作,NVS 同值写不磨损新页,
+            // 换"设置页/console 下行"单一路径。
+            const uint8_t lvl = a->u.settings.tone_level;
+            const bool night = a->u.settings.night_mute != 0;
+            nvs_settings_set_tone_level(lvl);
+            nvs_settings_set_night_mute(night ? 1 : 0);
+            time_sync_set_tz(a->u.settings.tz_hour);
+            app_sound_configure((tone_lvl_t)lvl, night);
+            break;
+        }
         case APP_ACT_PLAY_TONE:
             // S3:START 改异步播放,开流由 sound_worker 播完后的 TONE_DONE 事件驱动
             // (app_state 归约,分时语义保持:滴声先于采集)。app_task 不再阻塞 80ms。
@@ -330,10 +352,24 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
 }
 
 // ---- 应用任务:事件 → 归约器 → 动作 → 渲染;100ms 心跳驱动超时/秒表 ----
+// ---- 应用任务:事件 → 归约器 → 动作 → 渲染;100ms 心跳驱动超时/秒表 ----
+// 会话开始即装载持久化设置(NVS → 状态机 + 声音策略;2026-10-03):归约器是
+// 纯 C 不读 NVS,开机装载与 SAVE_SETTINGS 动作是它的唯一数据进出口。
 static void app_task(void *arg)
 {
     (void)arg;
     app_state_init(&s_state);
+    {
+        uint8_t lvl = TONE_LVL_DEFAULT, night = 0;
+        int8_t tz = 8;
+        nvs_settings_get_tone_level(&lvl);
+        nvs_settings_get_night_mute(&night);
+        (void)nvs_settings_get_tz_hour(&tz);
+        app_state_load_settings(&s_state, lvl, night, tz);
+        app_sound_configure((tone_lvl_t)lvl, night != 0);
+        // 时区生效:time_sync_init 在 app_main 已按 NVS 装载;此处状态机镜像
+        // 与之一致(若曾用 `time tz` 改过,两边同源无漂移)。
+    }
     QueueHandle_t q = app_events_queue();
     uint64_t next_tick = esp_timer_get_time() / 1000;
     uint64_t now_ms = next_tick;

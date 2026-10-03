@@ -51,6 +51,10 @@ static void out(const char *fmt, ...)
     else fwrite(buf, 1, (size_t)n, stdout);
 }
 
+// snd/night 的查询输出一行(cmd_st 亦复用;实现位于命令表定义之前即可,
+// 这里前置声明供 cmd_st 使用)
+static int snd_show(void);
+
 // ---- bt scan:射频诊断(BLE RX 前端验证)----
 // BLE 广播不可见时区分"RX 坏"与"TX 坏":主动扫描周边广播——
 // 扫到设备(Mac/手机/耳机)则天线+晶振+射频 RX 全好,问题锁 TX/adv;
@@ -278,6 +282,8 @@ static int cmd_st(int argc, char **argv)
     out("--- audio ---\n");
     out("streaming: %s peak: %d\n",
         audio_streamer_active() ? "yes" : "no", (int)audio_streamer_peak());
+    out("--- sound ---\n");
+    snd_show();   // 提示音档位/夜间静音/时区一行(与 `snd` 查询同一出口)
     out("--- battery ---\n");
     int soc = bsp_battery_soc();
     int mv = bsp_battery_mv();
@@ -350,6 +356,72 @@ static int cmd_mic(int argc, char **argv)
     return 0;
 }
 
+// ---- snd / night:提示音策略(2026-10-03)----
+// 用法: snd            查看档位
+//       snd high|low|off
+//       night          查看夜间静音
+//       night on|off   (窗口 21:30-07:00 固化在 tone_policy)
+// 与设置界面同一落地路径:读当前三元组(main.c 访问器)→ 改一项 → 整包投
+// APP_EV_SETTINGS_SET → 归约器产出 SAVE_SETTINGS(NVS + tz + 声音策略)。
+// 只投递不等待;队列满丢弃(低频命令,重发即可)。
+void app_settings_current(uint8_t *lvl, uint8_t *night, int8_t *tz);   /* main.c */
+
+static int snd_show(void)
+{
+    uint8_t lvl = 2, night = 0;
+    int8_t tz = 8;
+    app_settings_current(&lvl, &night, &tz);
+    static const char *const names[3] = { "off", "low", "high" };
+    out("sound: %s  night-mute(21:30-07:00): %s  tz: %+d\n",
+        names[lvl < 3 ? lvl : 2], night ? "on" : "off", tz);
+    return 0;
+}
+
+static int cmd_snd(int argc, char **argv)
+{
+    uint8_t lvl = 2;
+    if (argc < 2) return snd_show();
+    if (strcmp(argv[1], "off") == 0)      lvl = 0;
+    else if (strcmp(argv[1], "low") == 0) lvl = 1;
+    else if (strcmp(argv[1], "high") == 0) lvl = 2;
+    else { out("usage: snd [high|low|off]\n"); return 1; }
+
+    uint8_t night = 0;
+    int8_t tz = 8;
+    app_settings_current(NULL, &night, &tz);
+    app_event_t ev = {0};
+    ev.type = APP_EV_SETTINGS_SET;
+    ev.u.settings.tone_level = lvl;
+    ev.u.settings.night_mute = night;
+    ev.u.settings.tz_hour = tz;
+    app_event_post(&ev);
+    out("snd %s: posted\n", argv[1]);
+    return 0;
+}
+
+static int cmd_night(int argc, char **argv)
+{
+    uint8_t night = 0;
+    if (argc < 2) return snd_show();
+    if (strcmp(argv[1], "on") != 0 && strcmp(argv[1], "off") != 0) {
+        out("usage: night [on|off]\n");
+        return 1;
+    }
+    night = (strcmp(argv[1], "on") == 0) ? 1 : 0;
+
+    uint8_t lvl = 2;
+    int8_t tz = 8;
+    app_settings_current(&lvl, NULL, &tz);
+    app_event_t ev = {0};
+    ev.type = APP_EV_SETTINGS_SET;
+    ev.u.settings.tone_level = lvl;
+    ev.u.settings.night_mute = night;
+    ev.u.settings.tz_hour = tz;
+    app_event_post(&ev);
+    out("night %s: posted\n", argv[1]);
+    return 0;
+}
+
 // ---- 命令表(REPL 注册与 SYS 执行共用)----
 // 注:模式切换命令(mode)已随双通道常开架构退役(2026-08-28)。
 static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = {
@@ -360,6 +432,8 @@ static const struct { const char *name; esp_console_cmd_func_t fn; } s_cmds[] = 
     { "reboot",  cmd_reboot },
     { "factory", cmd_factory },
     { "mic",     cmd_mic },
+    { "snd",     cmd_snd },
+    { "night",   cmd_night },
 };
 #define CMD_COUNT (sizeof(s_cmds) / sizeof(s_cmds[0]))
 
@@ -443,5 +517,7 @@ esp_err_t console_cmds_register(void)
     reg("reboot", "重启设备", NULL, cmd_reboot);
     reg("factory", "清空 NVS 并重启", NULL, cmd_factory);
     reg("mic", "常开麦克风模式:mic on | mic off(虚拟麦克风用)", NULL, cmd_mic);
+    reg("snd", "提示音档位:snd [high|low|off]", NULL, cmd_snd);
+    reg("night", "夜间静音 21:30-07:00:night [on|off]", NULL, cmd_night);
     return ESP_OK;
 }

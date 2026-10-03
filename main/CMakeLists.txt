@@ -14,6 +14,7 @@ idf_component_register(
          "ble_dtm.c"      # 自 ESP-IDF 5.5.3 拷入:host 层 DTM API 未编入 libbt.a
          "console_cmds.c"
          "time_sync.c"
+         "tone_policy.c"
          "mode.c"
          "usb_link.c"
          "usb_link_framing.c"
@@ -25,4 +26,5 @@ idf_component_register(
              bt
              esp_pm       # 空闲 light sleep + CPU 变频(录音会话锁见 app_main)
              esp_driver_usb_serial_jtag
+             esp_app_format   # 开机画面版本号 esp_app_get_description(2026-10-03)
 )

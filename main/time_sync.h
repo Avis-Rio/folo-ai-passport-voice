@@ -19,5 +19,6 @@ bool time_sync_valid(void);                    // 是否已校时(UI "--:--" 判
 int time_sync_tz_hour(void);                   // 当前时区偏移小时(默认 8)
 esp_err_t time_sync_set_tz(int hour);          // 设置时区偏移(±12 校验,NVS 持久化)
 int time_sync_format_local(char *buf, size_t cap); // "HH:MM"(校时)或 "--:--"(未校时)
+int time_sync_local_minutes(void);             // 本地时间自午夜分钟数;未校时 -1(夜窗判定用)
 
 #endif /* TIME_SYNC_H */

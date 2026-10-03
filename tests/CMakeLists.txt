@@ -23,6 +23,11 @@ add_executable(test_app_state test_app_state.c ${MAIN_DIR}/app_state.c
 target_include_directories(test_app_state PRIVATE ${MAIN_DIR} ${FAKE_DIR})
 add_test(NAME app_state COMMAND test_app_state)
 
+# --- 提示音策略(纯 C:档位/夜间窗口/音量映射/循环)---
+add_executable(test_tone_policy test_tone_policy.c ${MAIN_DIR}/tone_policy.c)
+target_include_directories(test_tone_policy PRIVATE ${MAIN_DIR})
+add_test(NAME tone_policy COMMAND test_tone_policy)
+
 # --- UI 像素数学(仓库既有) ---
 add_executable(test_ui_pixel_math test_ui_pixel_math.c ${MAIN_DIR}/ui_pixel_math.c)
 target_include_directories(test_ui_pixel_math PRIVATE ${MAIN_DIR})

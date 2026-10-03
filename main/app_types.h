@@ -24,13 +24,18 @@ typedef enum {
     APP_ST_TRANSCRIBING,    // 等待 Mac 转写
     APP_ST_AGENT_RUNNING,   // Agent 执行中
     APP_ST_APPROVAL,        // 待物理审批
+    APP_ST_SETTINGS,        // 设置页(HOME/READY 下 OK 双击进入;2026-10-03)
     APP_ST_COUNT,
 } app_stage_t;
 
 // ---------------- 按键 ----------------
-// 物理键语义(2026-08-29):UP(音量加)= 按下即录、松开发送(按住说话);
-// DOWN(音量减)= 单击回车 / 长按 0.5s 清空输入框;OK = 单击导航·批准 /
-// 长按 0.5s 锁屏解锁。同一颗键上只放"单击 + 长按",不放双击(见 app_state.c)。
+// 物理键语义(2026-10-03 增设置页):UP(音量加)= 按下即录、松开发送(按住说话);
+// 常开麦(mic_hold)期间 UP 双击 = 循环切换提示音档位(该场景 UP 物理事件本就
+// 全部被吞,是唯一无冲突的快捷手势);DOWN(音量减)= 单击回车 / 长按 0.5s 清空
+// (设置页内长按 = 退出设置);OK = 单击导航·批准 / 双击进设置(HOME/READY)/
+// 长按 0.5s 锁屏解锁(设置页内长按 = 退出设置)。同一颗键上只放"单击 + 长按",
+// 不放双击(见 app_state.c);唯一例外 OK 双击:OK 单击在 READY 无语义、在 HOME
+// 只翻页,双击叠在上面零误触(真机键位规则内已验证的组合)。
 typedef enum {
     APP_BTN_UP = 0,
     APP_BTN_DOWN,
@@ -77,6 +82,10 @@ typedef enum {
     // 链路断开能结束。供桌面端把 Passport 当系统级麦克风用(BlackHole 中转)。
     APP_EV_MIC_ON,
     APP_EV_MIC_OFF,
+    // ---- 设置(2026-10-03:console `snd`/`night` 下行,与设置页同一落地路径)----
+    // 携带完整三元组(tone_level/night_mute/tz_hour):console 侧先经 main.c 访问器
+    // 读当前值,改一项后整包投递 —— 归约器无需"部分更新"语义。
+    APP_EV_SETTINGS_SET,
 } app_event_type_t;
 
 // ---------------- 链路通道(双通道常开架构,2026-08-28) ----------------
@@ -154,6 +163,11 @@ typedef struct {
             bool final;                                 // false=预览态(未定稿);true=定稿落定
         } transcript;                                   // TRANSCRIPT
         struct { int64_t epoch; } time_set;             // TIME_SET(UTC 秒,int64 对齐 8,union 仍 ≤228B)
+        struct {
+            uint8_t tone_level;                          // tone_lvl_t(0=OFF/1=LOW/2=HIGH)
+            uint8_t night_mute;                          // 0/1
+            int8_t  tz_hour;                             // ±12
+        } settings;                                      // SETTINGS_SET
     } u;
 } app_event_t;
 
@@ -174,6 +188,7 @@ typedef enum {
     APP_ACT_STREAM_CANCEL,   // 取消/断链:停采集 + 清空 ring + 丢弃在途帧(与 STOP 区别:不排空发送)
     APP_ACT_PLAY_TONE,
     APP_ACT_TIME_SET,        // time_sync_set_epoch(校时落地)
+    APP_ACT_SAVE_SETTINGS,   // 设置落地:NVS 三键 + time_sync_set_tz + app_sound_configure
 } app_action_type_t;
 
 // 单事件最多产出的动作数。emit() 满了就静默丢弃,所以这个值必须 ≥ 最长的
@@ -195,6 +210,11 @@ typedef struct {
             uint8_t decision;                           // app_approval_decision_t
         } agent_action;                                 // SEND_AGENT_ACTION
         struct { int64_t epoch; } time_set;             // TIME_SET
+        struct {
+            uint8_t tone_level;                         // tone_lvl_t
+            uint8_t night_mute;                         // 0/1
+            int8_t  tz_hour;                            // ±12
+        } settings;                                     // SAVE_SETTINGS
     } u;
 } app_action_t;
 
@@ -219,6 +239,11 @@ typedef struct {
     uint8_t        approval_risk;   // app_risk_t
     uint32_t       elapsed_ms;      // 当前状态已持续时长(主循环在快照时补)
     char           toast[APP_TOAST_MAX];
+    // 设置页(2026-10-03):state==APP_ST_SETTINGS 时渲染;tz 不走快照,
+    // app_ui 直接读 time_sync_tz_hour()(已依赖 time_sync 渲染顶栏,零新增耦合)
+    uint8_t        settings_sel;    // 选中项索引(0=Sound 1=NightMute 2=Timezone)
+    uint8_t        tone_level;      // tone_lvl_t
+    uint8_t        night_mute;      // 0/1
 } app_ui_snapshot_t;
 
 // ---------------- 超时常量 ----------------
@@ -241,6 +266,9 @@ typedef struct {
 // SEND_VOICE_END,已录的照常转写),不当错误处理 —— 真人一口气说不到 60s,正常
 // 使用永远碰不到这条路径。
 #define APP_PTT_MAX_TALK_MS     60000u
+// 设置页无操作自动退出(2026-10-03):设置是低频临时页,忘退出不该占着
+// 工作页(READY)。10s ≈ 看一眼档位再按两下键的从容时长;退出回 READY。
+#define APP_SETTINGS_IDLE_EXIT_MS 10000u
 
 #ifdef __cplusplus
 }

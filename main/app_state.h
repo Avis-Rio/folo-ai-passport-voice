@@ -46,9 +46,19 @@ typedef struct {
     bool           mic_hold;           // 常开麦克风模式(console `mic on` 置位):
                                        // LISTENING 下吞掉物理 UP 松开与 60s 兜底,
                                        // 仅 `mic off`/链路断开收束(2026-10-02)
+    // ---- 设置(2026-10-03):归约器是纯 C,不读 NVS;开机由 main.c 装载,
+    // 变更经 APP_ACT_SAVE_SETTINGS 动作持久化(与执行器边界一致)。----
+    uint8_t        tone_level;         // tone_lvl_t(0=OFF/1=LOW/2=HIGH;缺省 HIGH)
+    uint8_t        night_mute;         // 夜间静音(21:30-07:00)开关;缺省关
+    int8_t         tz_hour;            // 时区 ±12(缺省 8,与 time_sync 同源装载)
+    uint8_t        settings_sel;       // 设置页选中项(0=Sound 1=NightMute 2=Timezone)
+    uint64_t       settings_last_ms;   // 设置页最近按键时刻(10s 无操作自动退出)
 } app_state_t;
 
 void app_state_init(app_state_t *s);
+// 开机装载持久化设置(NVS 读出值;越界兜底缺省)。app_task 在 init 后调用一次。
+void app_state_load_settings(app_state_t *s, uint8_t tone_level, uint8_t night_mute,
+                             int8_t tz_hour);
 // 处理一个事件,产出 0..out_max 个动作。now_ms 为毫秒单调时钟。
 void app_state_reduce(app_state_t *s, const app_event_t *ev,
                       uint64_t now_ms, app_action_t *out, uint8_t *out_n);

@@ -17,6 +17,14 @@ esp_err_t nvs_settings_init(void);
 esp_err_t nvs_settings_get_tz_hour(int8_t *hour);
 esp_err_t nvs_settings_set_tz_hour(int8_t hour);
 
+// 提示音档位(u8,tone_lvl_t:0=OFF/1=LOW/2=HIGH;缺省 2=HIGH,2026-10 前的固定行为)
+esp_err_t nvs_settings_get_tone_level(uint8_t *lvl);
+esp_err_t nvs_settings_set_tone_level(uint8_t lvl);
+
+// 夜间自动静音(u8,0/1;缺省 0=关。窗口 21:30–07:00 固化在 tone_policy)
+esp_err_t nvs_settings_get_night_mute(uint8_t *on);
+esp_err_t nvs_settings_set_night_mute(uint8_t on);
+
 void nvs_settings_factory_reset(void);   // 清 "app" 命名空间
 
 #ifdef __cplusplus
