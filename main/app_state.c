@@ -859,14 +859,20 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
     }
 
     case APP_EV_APPROVAL_REQUEST:
-        // 锁定态收到审批:强制解锁亮屏 —— 审批必须被看见,防口袋盲批
-        // (与"APPROVAL 常亮不熄屏"政策一致)。
+        // 息屏/锁定收到审批:强制解锁 + 亮屏 + 面板上电 —— 审批必须被看见,
+        // 防口袋盲批(与"APPROVAL 常亮不熄屏"政策一致)。物理审批器(v2.2)
+        // 的外部请求多发生在息屏待机时,curl 一发屏幕就亮。
         if (s->locked) {
             s->locked = false;
+        }
+        if (!s->panel_on) {
             s->panel_on = true;
-            s->screen_on = true;
             app_action_t p = { .type = APP_ACT_UI_PANEL_ON };
             emit(out, out_n, max, p);
+        }
+        if (!s->screen_on) {
+            s->screen_on = true;
+            s->last_key_ms = now_ms;   // 唤醒即重置息屏计时(APPROVAL 本就常亮)
             app_action_t sc = { .type = APP_ACT_UI_SCREEN_ON };
             emit(out, out_n, max, sc);
         }

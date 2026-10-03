@@ -36,6 +36,8 @@ static uint16_t btn_real_mv(app_btn_t b) {
     }
 }
 
+static void mic_ev(app_event_type_t type, uint64_t ts);   // 定义在后面;审批唤醒用例前向引用
+
 static void reduce_btn(app_event_type_t t, app_btn_t b, uint64_t ts) {
     app_event_t ev = { .type = t };
     ev.u.key.btn = b;
@@ -657,6 +659,55 @@ static void test_approval(void) {
     reduce_btn(APP_EV_KEY_CLICK, APP_BTN_DOWN, now + 300);
     a = find_action(APP_ACT_SEND_KEY_ACTION);
     assert(a && a->u.key_action.action == APP_KEY_ENTER);
+}
+
+// ---- 审批唤醒(物理审批器 v2.2):息屏/锁定收到审批 → 强制亮屏 + 面板上电 ----
+static void test_approval_wake(void) {
+    // 20s 息屏(背光灭,面板仍通电):审批到达 → 只补背光
+    reset();
+    reduce(APP_EV_TICK, now + APP_IDLE_BACKLIGHT_OFF_MS + 1);
+    assert(s.screen_on == false && s.panel_on == true);
+    app_event_t ev = { .type = APP_EV_APPROVAL_REQUEST,
+                       .u.approval = { .task_id = "ext-1", .title = "git push",
+                                       .risk = APP_RISK_MEDIUM } };
+    app_state_reduce(&s, &ev, now + 10, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    assert(s.screen_on == true && s.panel_on == true);
+    assert(s.locked == false);
+    assert(has_action(APP_ACT_UI_SCREEN_ON));
+    assert(!has_action(APP_ACT_UI_PANEL_ON));       // 面板本就通电
+
+    // 60s 深息屏(面板断电):审批到达 → 面板上电 + 背光亮
+    reset();
+    reduce(APP_EV_TICK, now + APP_IDLE_PANEL_OFF_MS + 1);
+    assert(s.screen_on == false && s.panel_on == false);
+    app_state_reduce(&s, &ev, now + 10, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    assert(s.screen_on == true && s.panel_on == true);
+    assert(has_action(APP_ACT_UI_PANEL_ON));
+    assert(has_action(APP_ACT_UI_SCREEN_ON));
+
+    // 锁定态:解锁 + 亮屏(防口袋盲批)
+    reset();
+    reduce_btn(APP_EV_KEY_LONG, APP_BTN_OK, now + 10);
+    assert(s.locked == true && s.screen_on == false);
+    app_state_reduce(&s, &ev, now + 20, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    assert(s.locked == false);
+    assert(s.screen_on == true && s.panel_on == true);
+
+    // 已亮屏(RECORDING 中):审批照常打断,不重复发上电动作
+    reset();
+    s.link_up = true;
+    mic_ev(APP_EV_MIC_ON, now + 10);
+    reduce(APP_EV_TONE_DONE, now + 200);
+    assert(s.state == APP_ST_LISTENING && s.screen_on);
+    on = 0;
+    app_state_reduce(&s, &ev, now + 300, out, &on);
+    assert(s.state == APP_ST_APPROVAL);
+    assert(has_action(APP_ACT_STREAM_STOP));        // 录音收束(管线不泄漏)
+    assert(!has_action(APP_ACT_UI_SCREEN_ON));      // 无冗余上电
+    assert(!has_action(APP_ACT_UI_PANEL_ON));
 }
 
 // ---- 两级息屏/唤醒 ----
@@ -2092,6 +2143,7 @@ int main(void) {
     test_agent_running_timeout();
     test_agent_status_flow();
     test_approval();
+    test_approval_wake();
     test_approval_during_listening();
     test_screen_off_wake();
     test_screen_off_ready();
