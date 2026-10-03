@@ -159,6 +159,7 @@ typedef struct {
             char target[APP_TARGET_MAX];
             char diff_summary[APP_DIFF_MAX];
             uint8_t risk;                               // app_risk_t
+            uint8_t ext;                                // 物理审批器:src=="ext" → 决策后回 READY(非 AGENT_RUNNING)
         } approval;                                     // APPROVAL_REQUEST
         struct {
             char text[APP_TRANSCRIPT_MAX];

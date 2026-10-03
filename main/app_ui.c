@@ -11,6 +11,12 @@
 #include <stdio.h>
 #include <string.h>
 
+// 物理审批器:审批页内容可能含中文(标题/目标/差异摘要),内置 montserrat
+// 只有拉丁字形 → 全变方块。lv_font_conv 生成的 GB2312 全字库(7540 字形,
+// bpp2,~1MB flash,由 lv_font_cjk_*.c 提供)。
+LV_FONT_DECLARE(lv_font_cjk_20);
+LV_FONT_DECLARE(lv_font_cjk_14);
+
 // ---- 布局常量 ----
 #define BAR_H        26   // 顶栏高
 #define BANNER_Y     28   // OFFLINE / NET BUSY 横幅
@@ -292,12 +298,12 @@ static void build_approval(void)
     p->ap_risk_label = label(p->ap_risk_banner, "", &lv_font_montserrat_14, UI_INK,
                              0, 5, 200);
 
-    p->ap_title = label(p->root, "", &lv_font_montserrat_20, UI_INK, 20, 108, 200);
+    p->ap_title = label(p->root, "", &lv_font_cjk_20, UI_INK, 20, 108, 200);
     lv_obj_set_style_text_align(p->ap_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(p->ap_title, LV_LABEL_LONG_WRAP);
 
-    p->ap_target = label(p->root, "", &lv_font_montserrat_14, UI_SKY_DARK, 20, 150, 200);
-    p->ap_diff = label(p->root, "", &lv_font_montserrat_14, UI_MUTED, 20, 176, 200);
+    p->ap_target = label(p->root, "", &lv_font_cjk_14, UI_SKY_DARK, 20, 150, 200);
+    p->ap_diff = label(p->root, "", &lv_font_cjk_14, UI_MUTED, 20, 176, 200);
     lv_obj_set_style_text_align(p->ap_diff, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(p->ap_diff, LV_LABEL_LONG_WRAP);
     lv_obj_set_height(p->ap_diff, 88);

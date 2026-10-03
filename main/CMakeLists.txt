@@ -18,6 +18,8 @@ idf_component_register(
          "mode.c"
          "usb_link.c"
          "usb_link_framing.c"
+         "lv_font_cjk_20.c"   # 物理审批器:CJK 全字库(GB2312,审批标题/中文内容)
+         "lv_font_cjk_14.c"   # 同上,正文(target/diff 行)
     INCLUDE_DIRS "."
     REQUIRES bsp
              json

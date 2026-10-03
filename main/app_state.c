@@ -646,12 +646,20 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             str_cpy(a.u.agent_action.task_id, sizeof(a.u.agent_action.task_id), s->task_id);
             a.u.agent_action.decision = APP_ACTION_APPROVE;
             emit(out, n, max, a);
-            s->state = APP_ST_AGENT_RUNNING;
-            s->state_since_ms = now_ms;
-            str_cpy(s->agent_message, sizeof(s->agent_message), "Approved, agent continues...");
-            s->transcript_final = true;   // 非转写文本,无预览光标
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+            if (s->approval_ext) {
+                // 物理审批器:外部请求没有 agent 会话,落 AGENT_RUNNING 会
+                // 熄麦卡屏(看门狗 mic on 在该态被忽略)→ 回 READY,决策
+                // 上行照发,daemon 收到后即解锁等待中的 HTTP 请求。
+                s->approval_ext = 0;
+                abort_to_ready(s, now_ms, "Approved", out, n, max);
+            } else {
+                s->state = APP_ST_AGENT_RUNNING;
+                s->state_since_ms = now_ms;
+                str_cpy(s->agent_message, sizeof(s->agent_message), "Approved, agent continues...");
+                s->transcript_final = true;   // 非转写文本,无预览光标
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
+            }
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_UP) {
             app_action_t a = { .type = APP_ACT_SEND_AGENT_ACTION };
             str_cpy(a.u.agent_action.task_id, sizeof(a.u.agent_action.task_id), s->task_id);
@@ -660,12 +668,17 @@ static void handle_key(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
             app_action_t t = { .type = APP_ACT_PLAY_TONE };
             t.u.tone = APP_TONE_REJECT;
             emit(out, n, max, t);
-            s->state = APP_ST_AGENT_RUNNING;
-            s->state_since_ms = now_ms;
-            str_cpy(s->agent_message, sizeof(s->agent_message), "Rejected by user");
-            s->transcript_final = true;   // 非转写文本,无预览光标
-            app_action_t r = { .type = APP_ACT_UI_REFRESH };
-            emit(out, n, max, r);
+            if (s->approval_ext) {
+                s->approval_ext = 0;
+                abort_to_ready(s, now_ms, "Rejected", out, n, max);
+            } else {
+                s->state = APP_ST_AGENT_RUNNING;
+                s->state_since_ms = now_ms;
+                str_cpy(s->agent_message, sizeof(s->agent_message), "Rejected by user");
+                s->transcript_final = true;   // 非转写文本,无预览光标
+                app_action_t r = { .type = APP_ACT_UI_REFRESH };
+                emit(out, n, max, r);
+            }
         } else if (ev->type == APP_EV_KEY_CLICK && b == APP_BTN_DOWN) {
             send_key_action(s, APP_KEY_ENTER, out, n, max);
         }
@@ -888,6 +901,7 @@ void app_state_reduce(app_state_t *s, const app_event_t *ev, uint64_t now_ms,
         str_cpy(s->approval_target, sizeof(s->approval_target), ev->u.approval.target);
         str_cpy(s->approval_diff, sizeof(s->approval_diff), ev->u.approval.diff_summary);
         s->approval_risk = ev->u.approval.risk < APP_RISK_COUNT ? ev->u.approval.risk : APP_RISK_MEDIUM;
+        s->approval_ext = ev->u.approval.ext ? 1 : 0;   // 物理审批器:决策去向分流
         s->state = APP_ST_APPROVAL;
         s->state_since_ms = now_ms;
         app_action_t t = { .type = APP_ACT_PLAY_TONE };

@@ -91,6 +91,8 @@ static bool parse_approval(const cJSON *o, app_event_t *ev) {
     str_take(ev->u.approval.diff_summary, sizeof(ev->u.approval.diff_summary),
              cJSON_IsString(df) ? df->valuestring : "");
     ev->u.approval.risk = parse_risk(o);
+    const cJSON *src = cJSON_GetObjectItemCaseSensitive(o, "src");
+    ev->u.approval.ext = cJSON_IsString(src) && strcmp(src->valuestring, "ext") == 0;
     ev->type = APP_EV_APPROVAL_REQUEST;
     return true;
 }

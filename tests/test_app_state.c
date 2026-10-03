@@ -708,6 +708,46 @@ static void test_approval_wake(void) {
     assert(has_action(APP_ACT_STREAM_STOP));        // 录音收束(管线不泄漏)
     assert(!has_action(APP_ACT_UI_SCREEN_ON));      // 无冗余上电
     assert(!has_action(APP_ACT_UI_PANEL_ON));
+
+    // ---- 物理审批器:src=="ext" 外部请求 → 决策后回 READY(非 AGENT_RUNNING),
+    // 防止熄麦卡屏;决策上行照发,daemon 靠它解锁 HTTP 等待。----
+    reset();
+    s.link_up = true;
+    app_event_t evx = { .type = APP_EV_APPROVAL_REQUEST,
+                        .u.approval = { .task_id = "ext-42", .title = "部署到生产环境",
+                                        .risk = APP_RISK_LOW, .ext = 1 } };
+    app_state_reduce(&s, &evx, now, out, &on);
+    assert(s.state == APP_ST_APPROVAL && s.approval_ext == 1);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 100);   // 批准 → READY
+    assert(s.state == APP_ST_READY);
+    app_action_t *a = find_action(APP_ACT_SEND_AGENT_ACTION);
+    assert(a && a->u.agent_action.decision == APP_ACTION_APPROVE);
+    assert(strcmp(a->u.agent_action.task_id, "ext-42") == 0);
+    assert(has_action(APP_ACT_UI_REFRESH));
+    assert(s.approval_ext == 0);                    // 标志已清
+
+    // ext 拒绝:同样回 READY + 拒绝音
+    reset();
+    s.link_up = true;
+    evx.u.approval.ext = 1;
+    app_state_reduce(&s, &evx, now, out, &on);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_UP, now + 100);
+    assert(s.state == APP_ST_READY);
+    a = find_action(APP_ACT_SEND_AGENT_ACTION);
+    assert(a && a->u.agent_action.decision == APP_ACTION_REJECT);
+    assert(has_action(APP_ACT_PLAY_TONE));
+    app_action_t *t2 = find_action(APP_ACT_PLAY_TONE);
+    assert(t2->u.tone == APP_TONE_REJECT);
+
+    // 语音 agent 流(src 缺省)不受影响:决策后仍是 AGENT_RUNNING
+    reset();
+    s.link_up = true;
+    app_event_t eva = { .type = APP_EV_APPROVAL_REQUEST,
+                        .u.approval = { .task_id = "task_1", .title = "agent task" } };
+    app_state_reduce(&s, &eva, now, out, &on);
+    assert(s.approval_ext == 0);
+    reduce_btn(APP_EV_KEY_CLICK, APP_BTN_OK, now + 100);
+    assert(s.state == APP_ST_AGENT_RUNNING);
 }
 
 // ---- 两级息屏/唤醒 ----
