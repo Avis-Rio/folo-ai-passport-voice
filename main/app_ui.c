@@ -229,12 +229,15 @@ static void build_ask(void)
     lv_obj_set_height(p->ask_title, 54);
 
     for (int i = 0; i < APP_OPTS_MAX; i++) {
-        const int y = 116 + i * 46;
+        // 行距 42:第 4 行底 278 < 提示行 286(4 项同屏不重叠)。
+        // 面板自带 border 4 + pad 7(内容原点 11px):标签 y=8 → 字底 38 < 40,
+        // 14px 字面在 40px 面板内垂直居中(真机首刷文本贴底被裁,据此校正)。
+        const int y = 112 + i * 42;
         p->ask_panels[i] = ui_pixel_panel_create(p->root, 12, y, 216, 40, UI_PAPER);
         char num[4];
         snprintf(num, sizeof(num), "%d", i + 1);
-        label(p->ask_panels[i], num, &lv_font_montserrat_14, UI_MUTED, 6, 10, 16);
-        lv_obj_t *txt = label(p->ask_panels[i], "", &lv_font_cjk_14, UI_INK, 26, 10, 182);
+        label(p->ask_panels[i], num, &lv_font_montserrat_14, UI_MUTED, 2, 8, 16);
+        lv_obj_t *txt = label(p->ask_panels[i], "", &lv_font_cjk_14, UI_INK, 18, 8, 190);
         lv_obj_set_style_text_align(txt, LV_TEXT_ALIGN_LEFT, 0);
         p->ask_labels[i] = txt;
     }
